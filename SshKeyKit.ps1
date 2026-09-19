@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.2.0'
+$script:Version = '1.3.0'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -156,7 +156,7 @@ function Write-Banner {
 function Write-MenuItem {
     param([string]$Number, [string]$Title, [string]$Description)
     Write-Host "   [$Number] " -NoNewline -ForegroundColor Cyan
-    Write-Host $Title.PadRight(10) -NoNewline -ForegroundColor White
+    Write-Host $Title.PadRight(14) -NoNewline -ForegroundColor White
     Write-Host $Description -ForegroundColor DarkGray
 }
 
@@ -1002,10 +1002,37 @@ function Install-KeyOnHost {
     return [pscustomobject]@{ Status = $status; Login = $login; Target = $Target }
 }
 
-function Invoke-Deploy {
-    param([hashtable]$O, [bool]$Interactive, [string]$PubPath = '')
+function Show-HostListHelp {
+    $g = $script:G
+    Write-Host ''
+    Write-Host '  Host-list file format' -ForegroundColor White
+    Write-Host '  A plain text file with one server per line. Blank lines and lines starting with # are ignored.' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '      # example: servers.txt' -ForegroundColor DarkGray
+    $examples = @(
+        @('192.168.1.10',         'host',            '(uses the default user and port)'),
+        @('srv02.lab.local:2222', 'host:port',       '(custom SSH port)'),
+        @('root@esx01',           'user@host',       '(custom user)'),
+        @('backup@10.0.0.5:2200', 'user@host:port',  '(both)')
+    )
+    foreach ($row in $examples) {
+        Write-Host '      ' -NoNewline
+        Write-Host $row[0].PadRight(26) -NoNewline -ForegroundColor Cyan
+        Write-Host ($row[1].PadRight(16) + $row[2]) -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    Write-Host "  $($g.Dot) A user@ or :port on a line overrides the defaults you enter below." -ForegroundColor Gray
+    Write-Host "  $($g.Dot) The password is asked once and reused for every host." -ForegroundColor Gray
+    Write-Host "  $($g.Dot) With target 'auto', each server's OS is detected separately, so Linux, ESXi" -ForegroundColor Gray
+    Write-Host '    and MikroTik hosts can be mixed in one list.' -ForegroundColor Gray
+    Write-Host "  $($g.Dot) A failing host does not stop the others; a summary is shown at the end." -ForegroundColor Gray
+    Write-Host ''
+}
 
-    Write-Section 'Deploy public key'
+function Invoke-Deploy {
+    param([hashtable]$O, [bool]$Interactive, [string]$PubPath = '', [bool]$Batch = $false)
+
+    Write-Section $(if ($Batch) { 'Batch deploy' } else { 'Deploy public key' })
 
     # Which key? --------------------------------------------------------------
     if (-not $PubPath) {
@@ -1055,12 +1082,15 @@ function Invoke-Deploy {
     # Hosts: single host, or a host-list file ---------------------------------------
     $listFile = $O.HostList
     $server   = $O.Server
-    if (-not $listFile -and -not $server) {
+    if ($Batch -and -not $listFile) {
+        Show-HostListHelp
+        $listFile = (Read-Prompt -Label 'Path to the host-list file' -Validate {
+            param($v) if (-not (Test-Path -LiteralPath $v.Trim('"') -PathType Leaf)) { "File not found: $v" }
+        }).Trim('"')
+    }
+    elseif (-not $listFile -and -not $server) {
         if (-not $Interactive) { throw 'Missing target. Use --host <ip|name> or --host-list <file>.' }
-        $answer = Read-Prompt -Label 'IP / hostname (or a host-list .txt file)' -Validate {
-            param($v) if (-not (Test-Path -LiteralPath $v -PathType Leaf)) { Test-HostName $v }
-        }
-        if (Test-Path -LiteralPath $answer -PathType Leaf) { $listFile = $answer } else { $server = $answer }
+        $server = Read-Prompt -Label 'IP / hostname' -Validate { param($v) Test-HostName $v }
     }
     elseif ($server) {
         $problem = Test-HostName $server
@@ -1071,7 +1101,11 @@ function Invoke-Deploy {
                 -Validate { param($v) Test-PortNum $v })
 
     $defaultUser = ''
-    if ($O.Username -or $Interactive -or -not $listFile) {
+    if ($Batch -and $Interactive -and -not $O.Username) {
+        $defaultUser = Read-Prompt -Label 'Default username (Enter to skip if every line has user@)' -AllowEmpty `
+                -Validate { param($v) Test-UserName $v }
+    }
+    elseif ($O.Username -or $Interactive -or -not $listFile) {
         $label = if ($listFile) { 'Username (for hosts without user@)' } else { 'Username' }
         $defaultUser = Resolve-Value -Given $O.Username -Interactive $Interactive -Label $label `
                 -Validate { param($v) Test-UserName $v } -MissingMessage 'Missing username. Use --user <name>.'
@@ -1158,10 +1192,11 @@ function Show-Menu {
     try { Clear-Host } catch { }
     Write-Banner
     Write-Host ''
-    Write-MenuItem '1' 'Generate' 'Create a new SSH key pair'
-    Write-MenuItem '2' 'List'     'Show public keys in your .ssh folder'
-    Write-MenuItem '3' 'Deploy'   "Upload a public key to a Linux host"
-    Write-MenuItem '4' 'Exit'     ''
+    Write-MenuItem '1' 'Generate'     'Create a new SSH key pair'
+    Write-MenuItem '2' 'List'         'Show public keys in your .ssh folder'
+    Write-MenuItem '3' 'Deploy'       'Upload a public key to one server'
+    Write-MenuItem '4' 'Batch deploy' 'Upload a public key to many servers from a list file'
+    Write-MenuItem '5' 'Exit'         ''
     Write-Host ''
     Write-Host "  Key folder: $($script:SshDir)" -ForegroundColor DarkGray
     Write-Host ''
@@ -1171,7 +1206,7 @@ function Start-Interactive {
     while ($true) {
         Show-Menu
         $choice = Read-Prompt -Label 'Select an option' -Validate {
-            param($v) if ($v -notmatch '^[1-4]$') { 'Please enter 1, 2, 3 or 4.' }
+            param($v) if ($v -notmatch '^[1-5]$') { 'Please enter a number from 1 to 5.' }
         }
         switch ($choice) {
             '1' {
@@ -1188,7 +1223,8 @@ function Start-Interactive {
             }
             '2' { Invoke-Safely { Show-KeyList -Keys @(Get-KeyInfo) }; Suspend-Menu }
             '3' { Invoke-Safely { Invoke-Deploy -O @{} -Interactive $true }; Suspend-Menu }
-            '4' { Write-Host ''; Write-Info 'Goodbye.'; Write-Host ''; return }
+            '4' { Invoke-Safely { Invoke-Deploy -O @{} -Interactive $true -Batch $true }; Suspend-Menu }
+            '5' { Write-Host ''; Write-Info 'Goodbye.'; Write-Host ''; return }
         }
     }
 }
