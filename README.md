@@ -38,7 +38,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 
 ## Quick start
 
-1. Copy `SshKeyKit.ps1` somewhere (or clone this repository).
+1. Download `SshKeyKit.ps1` somewhere (or clone this repository).
 2. Open PowerShell (Windows Terminal gives the best look) and run:
 
 ```powershell
@@ -48,8 +48,9 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 If Windows blocks the script ("running scripts is disabled"):
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # this window only
-Unblock-File .\SshKeyKit.ps1                                 # if the file was downloaded
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass .\KeyPairTool.ps1   # this window only
+powershell -ExecutionPolicy Bypass -File .\KeyPairTool_v1.ps1                  # one-off run without changing any setting
+Unblock-File .\SshKeyKit.ps1                                                   # if the file was downloaded
 ```
 
 Keys are read from and written to `%USERPROFILE%\.ssh`.
