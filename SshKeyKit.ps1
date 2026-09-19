@@ -14,7 +14,8 @@
         .\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user root --key id_ed25519
         .\SshKeyKit.ps1 -Generate -Deploy --host srv01 --user admin      # generate, then deploy that key
         .\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin  # many servers, password asked once
-        .\SshKeyKit.ps1 -Deploy --target esxi --host esx01 --user root
+        .\SshKeyKit.ps1 -Deploy --host esx01 --user root                   # OS is detected automatically
+        .\SshKeyKit.ps1 -Deploy --target esxi --host esx01 --user root    # ...or forced
 
     Options
         -Generate / -List / -Deploy       what to do (omit all for the menu)
@@ -27,7 +28,8 @@
         --host <ip|name>  --port <n>      deploy target        (port default: 22)
         --user <name>     --password <pw> deploy credentials    (password is prompted if omitted)
         --key <name|path>                 public key to deploy (default: id_ed25519)
-        --target <linux|esxi|mikrotik>    what kind of server you deploy to (default: linux)
+        --target <auto|linux|esxi|mikrotik>  what kind of server you deploy to (default: auto = detect the
+                                          remote OS after login; an explicit value skips detection)
         --host-list <file>                deploy to many hosts; one per line: host | host:port | user@host[:port]
                                           (lines starting with # are ignored; the password is asked once)
         -AddToAgent                       after generating, load the key into ssh-agent
@@ -90,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.1.0'
+$script:Version = '1.2.0'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -352,11 +354,12 @@ function Resolve-Value {
 function Resolve-Target {
     param([string]$Value)
     switch ("$Value".ToLower()) {
+        'auto'     { return 'auto' }
         'linux'    { return 'linux' }
         'esxi'     { return 'esxi' }
         'mikrotik' { return 'mikrotik' }
         'routeros' { return 'mikrotik' }
-        default    { throw "Unsupported target '$Value'. Use linux, esxi or mikrotik." }
+        default    { throw "Unsupported target '$Value'. Use auto, linux, esxi or mikrotik." }
     }
 }
 
@@ -652,11 +655,85 @@ function Assert-HostReachable {
             throw "Connection to ${Server}:${Port} timed out - check the address, firewall and that SSH is running."
         }
         $client.EndConnect($async)
+
+        # An SSH server announces itself first (e.g. "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3"). Used only as a hint for OS detection.
+        $banner = ''
+        try {
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 3000
+            $buffer = New-Object byte[] 255
+            $count  = $stream.Read($buffer, 0, $buffer.Length)
+            if ($count -gt 0) { $banner = ([Text.Encoding]::ASCII.GetString($buffer, 0, $count) -split "\r?\n")[0].Trim() }
+        }
+        catch { $banner = '' }
+        return $banner
     }
     catch [System.Net.Sockets.SocketException] {
         throw "Cannot reach ${Server}:${Port} - $($_.Exception.Message)"
     }
     finally { $client.Close() }
+}
+
+# --- remote OS detection ----------------------------------------------------------------------------
+# Runs on the session that is already authenticated. `uname -s` is the main probe; the banner is only a
+# cross-check. Returns Target = linux | esxi | mikrotik | cisco | $null (unknown).
+function Get-RemoteOs {
+    param($Session, [string]$Banner)
+
+    $probe = Invoke-SSHCommand -SSHSession $Session -Command 'uname -s' -TimeOut 15
+    $text  = ((@($probe.Output) + @($probe.Error)) -join ' ').Trim()
+
+    $detected = $null
+    if     ($text -match '^VMkernel')                                    { $detected = 'esxi' }
+    elseif ($text -match '^(Linux|Darwin|FreeBSD|OpenBSD|NetBSD|SunOS)') { $detected = 'linux' }      # POSIX ~/.ssh layout
+    elseif ($text -match 'bad command name')                             { $detected = 'mikrotik' }   # RouterOS CLI error
+    elseif ($text -match '% ?Invalid|Invalid input|Unknown command')     { $detected = 'cisco' }      # IOS / IOS-XE CLI error
+
+    $hint = $null
+    if     ($Banner -match 'ROSSSH') { $hint = 'mikrotik' }
+    elseif ($Banner -match 'Cisco')  { $hint = 'cisco' }
+
+    $conflict   = [bool]($detected -and $hint -and $detected -ne $hint)
+    $bannerOnly = $false
+    if (-not $detected -and $hint) { $detected = $hint; $bannerOnly = $true }
+
+    # A friendly label (best effort - never fails detection)
+    $label = ''
+    try {
+        switch ($detected) {
+            'linux' {
+                $label = $text
+                if ($text -match '^Linux') {
+                    $os = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"'
+                    $pretty = (@($os.Output) -join ' ').Trim()
+                    if ($pretty) { $label = "$pretty (Linux)" }
+                }
+            }
+            'esxi' {
+                $v = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command 'vmware -v'
+                $label = (@($v.Output) -join ' ').Trim()
+                if (-not $label) { $label = 'VMware ESXi' }
+            }
+            'mikrotik' {
+                $v = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command '/system resource get version'
+                $ver = (@($v.Output) -join ' ').Trim()
+                $label = if ($ver -and $ver.Length -lt 40) { "MikroTik RouterOS $ver" } else { 'MikroTik RouterOS' }
+            }
+            'cisco' { $label = 'Cisco IOS / IOS-XE' }
+        }
+    }
+    catch { }
+    if (-not $label -and $detected) { $label = $detected }
+
+    return [pscustomobject]@{ Target = $detected; Label = $label; Conflict = $conflict; BannerOnly = $bannerOnly; Probe = $text.Substring(0, [Math]::Min(80, $text.Length)) }
+}
+
+function Assert-KeyFitsTarget {
+    param([string]$Target, [string]$PubLine)
+    if ($Target -eq 'mikrotik') {
+        if ($PubLine -match '^ecdsa-|^sk-') { throw 'RouterOS does not accept this key type. Use an RSA key (or Ed25519 on recent RouterOS 7.x).' }
+        if ($PubLine -match '^ssh-ed25519') { Write-Warn 'Ed25519 keys need a recent RouterOS 7.x; older versions only accept RSA.' }
+    }
 }
 
 # host list: one entry per line -> host | host:port | user@host[:port]   (# = comment)
@@ -837,12 +914,14 @@ if "$SSHD" -T 2>/dev/null | grep -qiE "^(passwordauthentication|kbdinteractiveau
 function Install-KeyOnHost {
     param(
         [string]$Target, [string]$Server, [int]$Port, [string]$Username, [securestring]$Secure,
-        [string]$PubPath, [string]$PubLine, [bool]$AcceptKey, [bool]$DisablePw, [bool]$AskDisablePw
+        [string]$PubPath, [string]$PubLine, [bool]$AcceptKey, [bool]$DisablePw, [bool]$AskDisablePw, [bool]$Ask = $false
     )
 
     Write-Info "Checking ${Server}:${Port} ..."
-    Assert-HostReachable -Server $Server -Port $Port
+    $banner = Assert-HostReachable -Server $Server -Port $Port
     Write-Ok 'Host is reachable.'
+    $wasAuto = ($Target -eq 'auto')
+    $os = $null
 
     $credential = New-Object System.Management.Automation.PSCredential($Username, $Secure)
     $connect = @{
@@ -867,6 +946,28 @@ function Install-KeyOnHost {
             else                                                         { throw "SSH connection failed: $msg" }
         }
         Write-Ok 'Authenticated.'
+
+        if ($wasAuto) {
+            Write-Info 'Detecting the remote OS...'
+            $os = Get-RemoteOs -Session $session -Banner $banner
+            if (-not $os.Target) {
+                throw ("Could not identify the remote OS (uname replied: $($os.Probe)). Supported targets: linux, esxi, mikrotik - " +
+                       "re-run with --target <type> to choose one yourself.")
+            }
+            if ($os.Target -eq 'cisco') { throw "Detected a Cisco device ($($os.Label)) - Cisco deployment is not supported yet." }
+            Write-Ok "Detected: $($os.Label)"
+            $unsure = ($os.Conflict -or $os.BannerOnly)
+            if ($unsure -and -not $Ask) {
+                throw "OS detection is not conclusive (SSH banner: $banner; uname replied: $($os.Probe)). Re-run with --target linux|esxi|mikrotik."
+            }
+            if ($unsure) { Write-Warn "Detection is not conclusive (SSH banner: $banner; uname replied: $($os.Probe))." }
+            if ($Ask -and -not (Read-Confirm "Deploy as '$($os.Target)'?" (-not $unsure))) {
+                throw 'Cancelled - re-run with --target to choose the deployment type yourself.'
+            }
+            $Target = $os.Target
+            Assert-KeyFitsTarget -Target $Target -PubLine $PubLine
+            if ($DisablePw -and $Target -ne 'linux') { Write-Warn "-DisablePasswordAuth only applies to Linux targets - ignored for this $Target host."; $DisablePw = $false }
+        }
 
         Write-Info 'Installing public key...'
         switch ($Target) {
@@ -898,7 +999,7 @@ function Install-KeyOnHost {
             if ($go) { Disable-PasswordAuth -Server $Server -Port $Port -Username $Username -Secure $Secure -PubPath $PubPath }
         }
     }
-    return [pscustomobject]@{ Status = $status; Login = $login }
+    return [pscustomobject]@{ Status = $status; Login = $login; Target = $Target }
 }
 
 function Invoke-Deploy {
@@ -938,20 +1039,18 @@ function Invoke-Deploy {
     Write-Host ''
 
     # Target type ---------------------------------------------------------------
-    $target = 'linux'
+    $target = 'auto'
     if ($O.Target) { $target = Resolve-Target $O.Target }
     elseif ($Interactive) {
         $target = Select-Option -Title 'Target type' -Default 1 -Options @(
+            @{ Value = 'auto';     Text = 'auto';     Note = 'detect the remote OS after login (recommended)' }
             @{ Value = 'linux';    Text = 'linux';    Note = 'OpenSSH server - ~/.ssh/authorized_keys' }
             @{ Value = 'esxi';     Text = 'esxi';     Note = 'VMware ESXi - /etc/ssh/keys-<user>/authorized_keys' }
             @{ Value = 'mikrotik'; Text = 'mikrotik'; Note = 'RouterOS - uploads the key and imports it' }
         )
         Write-Host ''
     }
-    if ($target -eq 'mikrotik') {
-        if ($pubLine -match '^ecdsa-|^sk-') { throw 'RouterOS does not accept this key type. Use an RSA key (or Ed25519 on recent RouterOS 7.x).' }
-        if ($pubLine -match '^ssh-ed25519') { Write-Warn 'Ed25519 keys need a recent RouterOS 7.x; older versions only accept RSA.' }
-    }
+    if ($target -ne 'auto') { Assert-KeyFitsTarget -Target $target -PubLine $pubLine }   # fail fast; auto re-checks per host
 
     # Hosts: single host, or a host-list file ---------------------------------------
     $listFile = $O.HostList
@@ -1001,8 +1100,8 @@ function Invoke-Deploy {
     # Options that apply to every host ---------------------------------------------------
     $acceptKey = [bool]$O.AcceptHostKey
     $disablePw = [bool]$O.DisablePasswordAuth
-    if ($disablePw -and $target -ne 'linux') { Write-Warn "-DisablePasswordAuth only applies to Linux targets - ignored for '$target'."; $disablePw = $false }
-    $askDisable = ($Interactive -and -not $bulk -and $target -eq 'linux' -and -not $disablePw)
+    if ($disablePw -and $target -notin 'linux', 'auto') { Write-Warn "-DisablePasswordAuth only applies to Linux targets - ignored for '$target'."; $disablePw = $false }
+    $askDisable = ($Interactive -and -not $bulk -and $target -in 'linux', 'auto' -and -not $disablePw)
 
     Write-Host ''
     if ($acceptKey) { Write-Warn 'Host keys are accepted automatically (-AcceptHostKey). Only use this on networks you trust.' }
@@ -1021,8 +1120,8 @@ function Invoke-Deploy {
         }
         try {
             $r = Install-KeyOnHost -Target $target -Server $e.Server -Port $e.Port -Username $e.User -Secure $secure `
-                    -PubPath $PubPath -PubLine $pubLine -AcceptKey $acceptKey -DisablePw $disablePw -AskDisablePw $askDisable
-            $detail = if ($r.Status -eq 'present') { 'key was already present' } else { 'key installed' }
+                    -PubPath $PubPath -PubLine $pubLine -AcceptKey $acceptKey -DisablePw $disablePw -AskDisablePw $askDisable -Ask ($Interactive -and -not $bulk)
+            $detail = "[$($r.Target)] " + $(if ($r.Status -eq 'present') { 'key was already present' } else { 'key installed' })
             $detail += switch ($r.Login) { 'ok' { ', login verified' } 'failed' { ', login test FAILED' } default { '' } }
             $results += [pscustomobject]@{ Host = $label; Ok = $true; Detail = $detail }
         }
@@ -1115,7 +1214,7 @@ function Show-Usage {
     Write-Host '    --host <ip|name> --port <n>    deploy target (port default 22)' -ForegroundColor Gray
     Write-Host '    --user <name> --password <pw>  deploy credentials (password prompted if omitted)' -ForegroundColor Gray
     Write-Host '    --key <name|path>              public key to deploy (default id_ed25519)' -ForegroundColor Gray
-    Write-Host '    --target <linux|esxi|mikrotik> server type (default linux)' -ForegroundColor Gray
+    Write-Host '    --target <auto|linux|esxi|mikrotik>  server type (default auto = detect the remote OS)' -ForegroundColor Gray
     Write-Host '    --host-list <file>             many hosts: host | host:port | user@host[:port]' -ForegroundColor Gray
     Write-Host '    -AddToAgent                    load the new key into ssh-agent' -ForegroundColor Gray
     Write-Host '    -DisablePasswordAuth           Linux: disable SSH password login after a verified key login' -ForegroundColor Gray
