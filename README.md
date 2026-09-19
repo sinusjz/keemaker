@@ -1,4 +1,4 @@
-# SshKeyKit
+# SSH Key-Kit
 
 Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a whole list, from an interactive menu or with scriptable command-line options.
 
