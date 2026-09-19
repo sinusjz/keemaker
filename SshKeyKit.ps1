@@ -13,6 +13,8 @@
         .\SshKeyKit.ps1 -List
         .\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user root --key id_ed25519
         .\SshKeyKit.ps1 -Generate -Deploy --host srv01 --user admin      # generate, then deploy that key
+        .\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin  # many servers, password asked once
+        .\SshKeyKit.ps1 -Deploy --target esxi --host esx01 --user root
 
     Options
         -Generate / -List / -Deploy       what to do (omit all for the menu)
@@ -25,8 +27,13 @@
         --host <ip|name>  --port <n>      deploy target        (port default: 22)
         --user <name>     --password <pw> deploy credentials    (password is prompted if omitted)
         --key <name|path>                 public key to deploy (default: id_ed25519)
+        --target <linux|esxi|mikrotik>    what kind of server you deploy to (default: linux)
+        --host-list <file>                deploy to many hosts; one per line: host | host:port | user@host[:port]
+                                          (lines starting with # are ignored; the password is asked once)
+        -AddToAgent                       after generating, load the key into ssh-agent
+        -DisablePasswordAuth              Linux only: after a VERIFIED key login, turn off SSH password login
         -Force                            overwrite existing keys / skip confirmations
-        -AcceptHostKey                    trust an unknown server host key without asking
+        -AcceptHostKey                    trust an unknown server host key without asking (use sparingly)
         -Help                             show this help
 
     Exit code: 0 = success, 1 = error (handy for automation).
@@ -63,9 +70,13 @@ param(
     [object]$Passphrase,
     [string]$Key,
     [int]$Port,
+    [string]$Target,
+    [string]$HostList,
 
     [switch]$Force,
     [switch]$AcceptHostKey,
+    [switch]$AddToAgent,
+    [switch]$DisablePasswordAuth,
 
     # Catches GNU-style options such as --type ed25519 --byte 2048
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -79,7 +90,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.0.0'
+$script:Version = '1.1.0'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -285,7 +296,7 @@ function ConvertTo-Secure {
 # Runs an executable with full control over quoting (avoids PowerShell's native-argument quirks,
 # e.g. empty-string arguments being dropped in Windows PowerShell 5.1).
 function Invoke-Native {
-    param([Parameter(Mandatory)][string]$File, [string[]]$Arguments = @())
+    param([Parameter(Mandatory)][string]$File, [string[]]$Arguments = @(), [string]$InputText = $null)
 
     $quoted = foreach ($a in $Arguments) {
         $s = $a -replace '(\\*)"', '$1$1\"'
@@ -305,7 +316,8 @@ function Invoke-Native {
     try { $proc = [System.Diagnostics.Process]::Start($psi) }
     catch { throw "Could not start '$File': $($_.Exception.Message)" }
 
-    $proc.StandardInput.Close()      # never wait for input
+    if ($InputText) { $proc.StandardInput.Write($InputText) }   # e.g. a sudo password (never on a command line)
+    $proc.StandardInput.Close()                                 # never wait for more input
     $out = $proc.StandardOutput.ReadToEndAsync()
     $err = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
@@ -335,6 +347,53 @@ function Resolve-Value {
     if ($Interactive) { return (Read-Prompt -Label $Label -Default $Default -Validate $Validate) }
     if ($Default)     { return $Default }
     throw $MissingMessage
+}
+
+function Resolve-Target {
+    param([string]$Value)
+    switch ("$Value".ToLower()) {
+        'linux'    { return 'linux' }
+        'esxi'     { return 'esxi' }
+        'mikrotik' { return 'mikrotik' }
+        'routeros' { return 'mikrotik' }
+        default    { throw "Unsupported target '$Value'. Use linux, esxi or mikrotik." }
+    }
+}
+
+# ============================================================================
+#  ssh-agent helpers
+# ============================================================================
+function Test-KeyInAgent {
+    param([string]$PubPath)
+    $keygen = Get-Tool 'ssh-keygen'; $sshAdd = Get-Tool 'ssh-add'
+    if (-not $keygen -or -not $sshAdd) { return $false }
+    $fp = Invoke-Native -File $keygen -Arguments @('-l', '-f', $PubPath)
+    if ($fp.ExitCode -ne 0 -or $fp.StdOut -notmatch '(SHA256:\S+)') { return $false }
+    $wanted = $Matches[1]
+    $loaded = Invoke-Native -File $sshAdd -Arguments @('-l')
+    return ($loaded.ExitCode -eq 0 -and $loaded.StdOut.Contains($wanted))
+}
+
+function Add-KeyToAgent {
+    param([string]$PrivPath)
+    $sshAdd = Get-Tool 'ssh-add'
+    if (-not $sshAdd) { throw 'ssh-add was not found (it ships with the OpenSSH Client).' }
+    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+        $svc = Get-Service -Name 'ssh-agent' -ErrorAction SilentlyContinue
+        if (-not $svc) { throw 'The ssh-agent service is not installed (it ships with the OpenSSH Client).' }
+        if ($svc.Status -ne 'Running') {
+            if ($svc.StartType -eq 'Disabled') {
+                throw ("The ssh-agent service is disabled. Enable it once from an ADMIN PowerShell:`n" +
+                       "    Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent")
+            }
+            try { Start-Service -Name 'ssh-agent' -ErrorAction Stop }
+            catch { throw "Could not start the ssh-agent service (needs admin once): Start-Service ssh-agent" }
+        }
+    }
+    Write-Info 'Adding key to ssh-agent (enter the passphrase if asked)...'
+    $p = Start-Process -FilePath $sshAdd -ArgumentList ('"' + $PrivPath + '"') -NoNewWindow -Wait -PassThru
+    if ($p.ExitCode -ne 0) { throw 'ssh-add failed - the key was not loaded into the agent.' }
+    Write-Ok 'Key loaded into ssh-agent (you will not be asked for the passphrase again this session).'
 }
 
 # ============================================================================
@@ -487,6 +546,9 @@ function Invoke-Generate {
     # 5) Passphrase (optional) -----------------------------------------------
     $passphrase = ''
     if ($O.Passphrase) {
+        if ($O.Passphrase -isnot [securestring]) {
+            Write-Warn 'A plain-text passphrase on the command line ends up in your shell history - prefer the prompt.'
+        }
         $passphrase = ConvertTo-PlainText (ConvertTo-Secure $O.Passphrase)
         if ($passphrase.Length -lt 5) { throw 'Passphrase must be at least 5 characters.' }
     }
@@ -540,6 +602,17 @@ function Invoke-Generate {
     Write-KV 'Public key'  $pub
     if ($info) { Write-KV 'Fingerprint' $info.Fingerprint 'DarkGray' }
     Write-KV 'Passphrase'  ($(if ($passphrase) { 'set' } else { 'none' })) ($(if ($passphrase) { 'Green' } else { 'Yellow' }))
+
+    # ssh-agent: load the key so the passphrase is only typed once per session
+    $loadAgent = [bool]$O.AddToAgent
+    if (-not $loadAgent -and $Interactive) {
+        Write-Host ''
+        $loadAgent = Read-Confirm 'Add this key to ssh-agent now?' ([bool]$passphrase)
+    }
+    if ($loadAgent) {
+        try { Add-KeyToAgent -PrivPath $priv }
+        catch { Write-Warn $_.Exception.Message }
+    }
     return $pub
 }
 
@@ -586,6 +659,248 @@ function Assert-HostReachable {
     finally { $client.Close() }
 }
 
+# host list: one entry per line -> host | host:port | user@host[:port]   (# = comment)
+function Read-HostList {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Host list '$Path' was not found." }
+    $entries = @()
+    $lineNo  = 0
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $lineNo++
+        $t = "$line".Trim()
+        if (-not $t -or $t.StartsWith('#')) { continue }
+        if ($t -notmatch '^(?:(?<u>[A-Za-z0-9_][A-Za-z0-9_.-]*)@)?(?<h>[A-Za-z0-9._-]+)(?::(?<p>\d{1,5}))?$') {
+            throw "Host list line ${lineNo}: '$t' is not valid (use host, host:port or user@host[:port])."
+        }
+        $port = $null
+        if ($Matches['p']) {
+            $port = [int]$Matches['p']
+            if ($port -lt 1 -or $port -gt 65535) { throw "Host list line ${lineNo}: port must be between 1 and 65535." }
+        }
+        $entries += [pscustomobject]@{ Server = $Matches['h']; Port = $port; User = $Matches['u'] }
+    }
+    if ($entries.Count -eq 0) { throw "Host list '$Path' contains no hosts." }
+    return $entries
+}
+
+# --- per-target installers (each returns 'added' or 'present') --------------------------------
+function Install-KeyLinux {
+    param($Session, [string]$PubLine)
+    # The key travels base64-encoded, so no quoting/escaping problems are possible.
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($PubLine))
+    $script = @'
+umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if [ -s ~/.ssh/authorized_keys ] && [ -n "$(tail -c1 ~/.ssh/authorized_keys)" ]; then echo >> ~/.ssh/authorized_keys; fi; KEY=$(echo __B64__ | base64 -d); if grep -qxF -- "$KEY" ~/.ssh/authorized_keys; then echo KPT_PRESENT; else echo "$KEY" >> ~/.ssh/authorized_keys && echo KPT_ADDED; fi; command -v restorecon >/dev/null 2>&1 && restorecon -R ~/.ssh >/dev/null 2>&1; true
+'@
+    $cmd = "sh -c '" + $script.Replace('__B64__', $b64).Trim() + "'"
+    $cmd = $cmd -replace "`r", ''      # a CRLF checkout must never leak carriage returns into the remote shell
+    $res = Invoke-SSHCommand -SSHSession $Session -Command $cmd -TimeOut 30
+    $out = ($res.Output -join "`n")
+    if ($out -notmatch 'KPT_(ADDED|PRESENT)') {
+        throw "Remote command failed (exit $($res.ExitStatus)). $((@($res.Error) -join ' ').Trim())"
+    }
+    if ($out -match 'KPT_PRESENT') { return 'present' } else { return 'added' }
+}
+
+function Install-KeyEsxi {
+    param($Session, [string]$PubLine, [string]$Username)
+    # ESXi keeps per-user keys in /etc/ssh/keys-<user>/authorized_keys and runs a BusyBox shell.
+    # Only harmless characters are kept in the comment so the line is safe inside double quotes.
+    $safe = $PubLine -replace '[^A-Za-z0-9+/=@._ -]', '_'
+    $cmd = ('D=/etc/ssh/keys-{0}; F=$D/authorized_keys; mkdir -p $D; touch $F; ' +
+            'if [ -s $F ] && [ -n "$(tail -c 1 $F)" ]; then echo >> $F; fi; ' +
+            'if grep -qxF -- "{1}" $F; then echo KPT_PRESENT; else echo "{1}" >> $F && echo KPT_ADDED; fi; ' +
+            'chmod 600 $F; /sbin/auto-backup.sh >/dev/null 2>&1; true') -f $Username, $safe
+    $res = Invoke-SSHCommand -SSHSession $Session -Command $cmd -TimeOut 60
+    $out = ($res.Output -join "`n")
+    if ($out -notmatch 'KPT_(ADDED|PRESENT)') {
+        throw "Remote command failed on ESXi (exit $($res.ExitStatus)). $((@($res.Error) -join ' ').Trim())"
+    }
+    if ($out -match 'KPT_PRESENT') { return 'present' } else { return 'added' }
+}
+
+function Install-KeyMikrotik {
+    param($Session, [hashtable]$Connect, [string]$PubPath, [string]$Username)
+    # RouterOS has no authorized_keys file: upload the .pub over SFTP, then import it for the user.
+    $remoteName = 'kpt-import.pub'
+    $tmp  = Join-Path ([IO.Path]::GetTempPath()) $remoteName
+    Copy-Item -LiteralPath $PubPath -Destination $tmp -Force
+    $sftp = $null
+    try {
+        $sftp = New-SFTPSession @Connect
+        Set-SFTPItem -SessionId $sftp.SessionId -Path $tmp -Destination '/' -Force
+        $res = Invoke-SSHCommand -SSHSession $Session -TimeOut 30 `
+                   -Command "/user ssh-keys import public-key-file=$remoteName user=$Username"
+        $out = (($res.Output + $res.Error) -join ' ').Trim()
+        $null = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command "/file remove $remoteName"
+        if ($out -match 'already') { return 'present' }
+        if ($out -match 'fail|error|invalid|no such') { throw "RouterOS rejected the key: $out" }
+        return 'added'
+    }
+    finally {
+        if ($sftp) { $null = Remove-SFTPSession -SessionId $sftp.SessionId -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# --- login test ---------------------------------------------------------------------------------
+function Invoke-KeyProbe {
+    param([string]$Ssh, [string]$Priv, [string]$Server, [int]$Port, [string]$Username, [string]$Target)
+    $probe = if ($Target -eq 'mikrotik') { ':put KPT_OK' } else { 'echo KPT_OK' }
+    $t = Invoke-Native -File $Ssh -Arguments @(
+        '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10',
+        '-p', "$Port", '-i', $Priv, "$Username@$Server", $probe)
+    return [pscustomobject]@{ Ok = ($t.ExitCode -eq 0 -and $t.StdOut -match 'KPT_OK'); StdErr = $t.StdErr; ExitCode = $t.ExitCode }
+}
+
+# returns 'ok' | 'failed' | 'skipped'
+function Test-KeyLogin {
+    param([string]$PubPath, [string]$Server, [int]$Port, [string]$Username, [string]$Target)
+    $priv   = $PubPath -replace '\.pub$', ''
+    $ssh    = Get-Tool 'ssh'
+    $keygen = Get-Tool 'ssh-keygen'
+    if (-not $ssh -or -not $keygen -or -not (Test-Path -LiteralPath $priv)) { return 'skipped' }
+
+    $needsPassphrase = (Invoke-Native -File $keygen -Arguments @('-y', '-P', '', '-f', $priv)).ExitCode -ne 0
+    if ($needsPassphrase -and -not (Test-KeyInAgent -PubPath $PubPath)) {
+        Write-Info 'Private key has a passphrase and is not loaded in ssh-agent - login test skipped.'
+        Write-Info "Load it with:  ssh-add `"$priv`"   (or generate with -AddToAgent)"
+        return 'skipped'
+    }
+    Write-Info 'Testing key-based login...'
+    $r = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target $Target
+    if ($r.Ok) { Write-Ok 'Key-based login works.'; return 'ok' }
+    $why = if ($r.StdErr) { ($r.StdErr -split "\r?\n")[-1] } else { "exit code $($r.ExitCode)" }
+    Write-Warn "Key installed, but the login test failed: $why"
+    Write-Info 'Check PubkeyAuthentication, SELinux contexts and home-directory permissions on the server.'
+    return 'failed'
+}
+
+# --- turn off SSH password login (Linux only, only after a verified key login) -----------------
+function Disable-PasswordAuth {
+    param([string]$Server, [int]$Port, [string]$Username, [securestring]$Secure, [string]$PubPath)
+
+    $ssh  = Get-Tool 'ssh'
+    $priv = $PubPath -replace '\.pub$', ''
+    # Runs as root on the server. Uses a drop-in file when sshd_config includes sshd_config.d (first value wins,
+    # so "00-" sorts first); otherwise edits sshd_config with a backup. Validates with sshd -t and reverts on error.
+    $remote = @'
+MAIN=/etc/ssh/sshd_config
+DROP=/etc/ssh/sshd_config.d
+CONF=$DROP/00-sshkeykit.conf
+SSHD=$(command -v sshd || echo /usr/sbin/sshd)
+if "$SSHD" -T 2>/dev/null | grep -qi "^kbdinteractiveauthentication"; then KBD=KbdInteractiveAuthentication; else KBD=ChallengeResponseAuthentication; fi
+if [ -d "$DROP" ] && grep -qiE "^[[:space:]]*Include[[:space:]].*sshd_config\.d" "$MAIN"; then
+  MODE=dropin
+  printf "PasswordAuthentication no\n%s no\n" "$KBD" > "$CONF"
+else
+  MODE=main
+  cp -p "$MAIN" "$MAIN.kpt.bak"
+  sed -i -E "s/^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)[[:space:]].*/#&/" "$MAIN"
+  printf "\nPasswordAuthentication no\n%s no\n" "$KBD" >> "$MAIN"
+fi
+if ! "$SSHD" -t 2>/dev/null; then
+  if [ "$MODE" = dropin ]; then rm -f "$CONF"; else cp -p "$MAIN.kpt.bak" "$MAIN"; fi
+  echo KPT_PW_FAILED_TEST; exit 1
+fi
+(systemctl reload sshd || systemctl reload ssh || service sshd reload || service ssh reload) >/dev/null 2>&1 || { echo KPT_PW_RELOAD_FAILED; exit 1; }
+if "$SSHD" -T 2>/dev/null | grep -qiE "^(passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication) yes"; then echo KPT_PW_NOT_EFFECTIVE; else echo KPT_PW_DISABLED; fi
+'@
+    $remote = $remote -replace "`r", ''   # a CRLF checkout must never leak carriage returns into the remote shell
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remote))
+    # root runs it directly; everyone else through sudo, with the password fed on stdin (never on a command line)
+    $cmd = 'S=; [ "$(id -u)" -ne 0 ] && S="sudo -S"; $S sh -c "$(echo ' + $b64 + ' | base64 -d)"'
+
+    Write-Info 'Disabling SSH password login (uses root / sudo)...'
+    $r = Invoke-Native -File $ssh -InputText ((ConvertTo-PlainText $Secure) + "`n") -Arguments @(
+        '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10',
+        '-p', "$Port", '-i', $priv, "$Username@$Server", $cmd)
+
+    switch -Regex ($r.StdOut) {
+        'KPT_PW_DISABLED' {
+            Write-Ok 'SSH password login is now disabled (password and keyboard-interactive).'
+            $again = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target 'linux'
+            if ($again.Ok) { Write-Ok 'Key-based login re-tested after the change: still works.' }
+            else           { Write-Warn 'Key login could NOT be re-tested after the change - keep your current session open and check it.' }
+            return
+        }
+        'KPT_PW_NOT_EFFECTIVE' { Write-Warn 'The setting was written, but sshd still reports password login enabled (a Match block or an earlier config line wins). Check sshd -T on the server.'; return }
+        'KPT_PW_FAILED_TEST'   { Write-Warn 'sshd rejected the new configuration; it was reverted. Password login is unchanged.'; return }
+        'KPT_PW_RELOAD_FAILED' { Write-Warn 'The config was written, but sshd could not be reloaded. Reload it manually (systemctl reload sshd).'; return }
+    }
+    $why = if ($r.StdErr) { ($r.StdErr -split "\r?\n")[-1] } else { "exit code $($r.ExitCode)" }
+    Write-Warn "Could not disable password login (needs root or working sudo): $why"
+}
+
+# --- one host, start to finish ------------------------------------------------------------------
+function Install-KeyOnHost {
+    param(
+        [string]$Target, [string]$Server, [int]$Port, [string]$Username, [securestring]$Secure,
+        [string]$PubPath, [string]$PubLine, [bool]$AcceptKey, [bool]$DisablePw, [bool]$AskDisablePw
+    )
+
+    Write-Info "Checking ${Server}:${Port} ..."
+    Assert-HostReachable -Server $Server -Port $Port
+    Write-Ok 'Host is reachable.'
+
+    $credential = New-Object System.Management.Automation.PSCredential($Username, $Secure)
+    $connect = @{
+        ComputerName      = $Server
+        Port              = $Port
+        Credential        = $credential
+        ConnectionTimeout = 15
+        ErrorAction       = 'Stop'
+    }
+    if ($AcceptKey) { $connect['AcceptKey'] = $true }
+
+    $session = $null
+    $status  = 'added'
+    try {
+        Write-Info "Connecting as ${Username}@${Server} ..."
+        try { $session = New-SSHSession @connect }
+        catch {
+            $msg = Get-RootMessage $_.Exception
+            if     ($msg -match 'Permission denied|Authentication|auth') { throw "Authentication failed for ${Username}@${Server} - check the username/password and that password login is enabled on the server." }
+            elseif ($msg -match 'timed out|timeout')                     { throw "Connection to ${Server}:${Port} timed out." }
+            elseif ($msg -match 'Key exchange|Object reference')         { throw "Key exchange failed - the server's host key was probably not trusted. Answer Y at the fingerprint prompt, or use -AcceptHostKey. (Otherwise client and server share no common algorithms.)" }
+            else                                                         { throw "SSH connection failed: $msg" }
+        }
+        Write-Ok 'Authenticated.'
+
+        Write-Info 'Installing public key...'
+        switch ($Target) {
+            'esxi'     { $status = Install-KeyEsxi     -Session $session -PubLine $PubLine -Username $Username }
+            'mikrotik' { $status = Install-KeyMikrotik -Session $session -Connect $connect -PubPath $PubPath -Username $Username }
+            default    { $status = Install-KeyLinux    -Session $session -PubLine $PubLine }
+        }
+        $where = switch ($Target) { 'esxi' { "/etc/ssh/keys-$Username/authorized_keys" } 'mikrotik' { "RouterOS user '$Username'" } default { '~/.ssh/authorized_keys' } }
+        if ($status -eq 'present') { Write-Ok 'Key was already authorized on the server - nothing changed.' }
+        else                       { Write-Ok "Key installed ($where) for ${Username}@${Server}." }
+    }
+    finally {
+        if ($session) { $null = Remove-SSHSession -SSHSession $session -ErrorAction SilentlyContinue }
+    }
+
+    $login = Test-KeyLogin -PubPath $PubPath -Server $Server -Port $Port -Username $Username -Target $Target
+
+    if ($Target -eq 'linux' -and ($DisablePw -or $AskDisablePw)) {
+        if ($login -ne 'ok') {
+            Write-Warn 'Password login was NOT disabled: key-based login has not been verified, and disabling it now could lock you out.'
+        }
+        else {
+            $go = $DisablePw
+            if (-not $go) {
+                Write-Host ''
+                Write-Info 'Key login just worked, so turning off password login is safe. This disables password AND keyboard-interactive logins.'
+                $go = Read-Confirm 'Disable SSH password login on this server now?' $false
+            }
+            if ($go) { Disable-PasswordAuth -Server $Server -Port $Port -Username $Username -Secure $Secure -PubPath $PubPath }
+        }
+    }
+    return [pscustomobject]@{ Status = $status; Login = $login }
+}
+
 function Invoke-Deploy {
     param([hashtable]$O, [bool]$Interactive, [string]$PubPath = '')
 
@@ -622,102 +937,119 @@ function Invoke-Deploy {
     Write-Info "Key: $PubPath"
     Write-Host ''
 
-    # Target ------------------------------------------------------------------
-    $server   = Resolve-Value -Given $O.Server -Interactive $Interactive -Label 'IP / hostname' `
-                    -Validate { param($v) Test-HostName $v } -MissingMessage 'Missing target host. Use --host <ip|name>.'
-    $port     = [int](Resolve-Value -Given $O.Port -Interactive $Interactive -Label 'SSH port' -Default '22' `
-                    -Validate { param($v) Test-PortNum $v })
-    $username = Resolve-Value -Given $O.Username -Interactive $Interactive -Label 'Username' `
-                    -Validate { param($v) Test-UserName $v } -MissingMessage 'Missing username. Use --user <name>.'
+    # Target type ---------------------------------------------------------------
+    $target = 'linux'
+    if ($O.Target) { $target = Resolve-Target $O.Target }
+    elseif ($Interactive) {
+        $target = Select-Option -Title 'Target type' -Default 1 -Options @(
+            @{ Value = 'linux';    Text = 'linux';    Note = 'OpenSSH server - ~/.ssh/authorized_keys' }
+            @{ Value = 'esxi';     Text = 'esxi';     Note = 'VMware ESXi - /etc/ssh/keys-<user>/authorized_keys' }
+            @{ Value = 'mikrotik'; Text = 'mikrotik'; Note = 'RouterOS - uploads the key and imports it' }
+        )
+        Write-Host ''
+    }
+    if ($target -eq 'mikrotik') {
+        if ($pubLine -match '^ecdsa-|^sk-') { throw 'RouterOS does not accept this key type. Use an RSA key (or Ed25519 on recent RouterOS 7.x).' }
+        if ($pubLine -match '^ssh-ed25519') { Write-Warn 'Ed25519 keys need a recent RouterOS 7.x; older versions only accept RSA.' }
+    }
 
+    # Hosts: single host, or a host-list file ---------------------------------------
+    $listFile = $O.HostList
+    $server   = $O.Server
+    if (-not $listFile -and -not $server) {
+        if (-not $Interactive) { throw 'Missing target. Use --host <ip|name> or --host-list <file>.' }
+        $answer = Read-Prompt -Label 'IP / hostname (or a host-list .txt file)' -Validate {
+            param($v) if (-not (Test-Path -LiteralPath $v -PathType Leaf)) { Test-HostName $v }
+        }
+        if (Test-Path -LiteralPath $answer -PathType Leaf) { $listFile = $answer } else { $server = $answer }
+    }
+    elseif ($server) {
+        $problem = Test-HostName $server
+        if ($problem) { throw $problem }
+    }
+
+    $port = [int](Resolve-Value -Given $O.Port -Interactive $Interactive -Label 'SSH port' -Default '22' `
+                -Validate { param($v) Test-PortNum $v })
+
+    $defaultUser = ''
+    if ($O.Username -or $Interactive -or -not $listFile) {
+        $label = if ($listFile) { 'Username (for hosts without user@)' } else { 'Username' }
+        $defaultUser = Resolve-Value -Given $O.Username -Interactive $Interactive -Label $label `
+                -Validate { param($v) Test-UserName $v } -MissingMessage 'Missing username. Use --user <name>.'
+    }
+
+    $entries = @()
+    if ($listFile) {
+        foreach ($e in @(Read-HostList $listFile)) {
+            $u = if ($e.User) { $e.User } else { $defaultUser }
+            if (-not $u) { throw "No username for host '$($e.Server)': add user@ in the list or use --user." }
+            $entries += [pscustomobject]@{ Server = $e.Server; Port = $(if ($e.Port) { $e.Port } else { $port }); User = $u }
+        }
+    }
+    else { $entries = @([pscustomobject]@{ Server = $server; Port = $port; User = $defaultUser }) }
+    $bulk = $entries.Count -gt 1
+
+    # Password (asked once, reused for every host) ---------------------------------------
     if ($O.Password) {
         $secure = ConvertTo-Secure $O.Password
         if ($O.Password -isnot [securestring]) {
             Write-Warn 'A plain-text password on the command line ends up in your shell history - prefer the prompt.'
         }
     }
-    else { $secure = Read-Secret -Label 'Password' }
+    else { $secure = Read-Secret -Label $(if ($bulk) { "Password (used for all $($entries.Count) hosts)" } else { 'Password' }) }
 
-    # Pre-flight --------------------------------------------------------------
+    # Options that apply to every host ---------------------------------------------------
+    $acceptKey = [bool]$O.AcceptHostKey
+    $disablePw = [bool]$O.DisablePasswordAuth
+    if ($disablePw -and $target -ne 'linux') { Write-Warn "-DisablePasswordAuth only applies to Linux targets - ignored for '$target'."; $disablePw = $false }
+    $askDisable = ($Interactive -and -not $bulk -and $target -eq 'linux' -and -not $disablePw)
+
     Write-Host ''
-    Write-Info "Checking ${server}:${port} ..."
-    Assert-HostReachable -Server $server -Port $port
-    Write-Ok 'Host is reachable.'
+    if ($acceptKey) { Write-Warn 'Host keys are accepted automatically (-AcceptHostKey). Only use this on networks you trust.' }
+    else            { Write-Info 'For a new server you will be asked to confirm its host key fingerprint - answer Y only if it matches.' }
 
-    Initialize-PoshSsh
-
-    # Remote command: create ~/.ssh, fix permissions, append the key only if it is not there yet.
-    # The key travels base64-encoded so no quoting/escaping problems are possible.
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pubLine))
-    $script = @'
-umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if [ -s ~/.ssh/authorized_keys ] && [ -n "$(tail -c1 ~/.ssh/authorized_keys)" ]; then echo >> ~/.ssh/authorized_keys; fi; KEY=$(echo __B64__ | base64 -d); if grep -qxF -- "$KEY" ~/.ssh/authorized_keys; then echo KPT_PRESENT; else echo "$KEY" >> ~/.ssh/authorized_keys && echo KPT_ADDED; fi; command -v restorecon >/dev/null 2>&1 && restorecon -R ~/.ssh >/dev/null 2>&1; true
-'@
-    $remoteCommand = "sh -c '" + $script.Replace('__B64__', $b64).Trim() + "'"
-
-    $credential = New-Object System.Management.Automation.PSCredential($username, $secure)
-    $session = $null
-    try {
-        Write-Info "Connecting as ${username}@${server} ..."
-        $connect = @{
-            ComputerName      = $server
-            Port              = $port
-            Credential        = $credential
-            ConnectionTimeout = 15
-            ErrorAction       = 'Stop'
+    # Go ---------------------------------------------------------------------------------
+    $results = @()
+    $i = 0
+    foreach ($e in $entries) {
+        $i++
+        $label = "$($e.User)@$($e.Server):$($e.Port)"
+        if ($bulk) {
+            Write-Host ''
+            Write-Host "  [$i/$($entries.Count)] " -NoNewline -ForegroundColor Cyan
+            Write-Host $label -ForegroundColor White
         }
-        if ($O.AcceptHostKey) { $connect['AcceptKey'] = $true }
-
-        try { $session = New-SSHSession @connect }
+        try {
+            $r = Install-KeyOnHost -Target $target -Server $e.Server -Port $e.Port -Username $e.User -Secure $secure `
+                    -PubPath $PubPath -PubLine $pubLine -AcceptKey $acceptKey -DisablePw $disablePw -AskDisablePw $askDisable
+            $detail = if ($r.Status -eq 'present') { 'key was already present' } else { 'key installed' }
+            $detail += switch ($r.Login) { 'ok' { ', login verified' } 'failed' { ', login test FAILED' } default { '' } }
+            $results += [pscustomobject]@{ Host = $label; Ok = $true; Detail = $detail }
+        }
         catch {
-            $msg = Get-RootMessage $_.Exception
-            if     ($msg -match 'Permission denied|Authentication|auth') { throw "Authentication failed for ${username}@${server} - check the username/password and that password login is enabled in sshd_config." }
-            elseif ($msg -match 'timed out|timeout')                     { throw "Connection to ${server}:${port} timed out." }
-            elseif ($msg -match 'Key exchange|Object reference')         { throw "Key exchange failed - the server's host key was probably not trusted. Answer Y at the fingerprint prompt, or use -AcceptHostKey. (Otherwise client and server share no common algorithms.)" }
-            else                                                         { throw "SSH connection failed: $msg" }
-        }
-        Write-Ok 'Authenticated.'
-
-        Write-Info 'Installing public key...'
-        $result = Invoke-SSHCommand -SSHSession $session -Command $remoteCommand -TimeOut 30
-        $output = ($result.Output -join "`n")
-        if ($output -notmatch 'KPT_(ADDED|PRESENT)') {
-            $stderr = (@($result.Error) -join ' ').Trim()
-            throw "Remote command failed (exit $($result.ExitStatus)). $stderr"
-        }
-        if ($output -match 'KPT_PRESENT') { Write-Ok 'Key was already authorized on the server - nothing changed.' }
-        else                              { Write-Ok "Key installed in ~/.ssh/authorized_keys for ${username}@${server}." }
-    }
-    finally {
-        if ($session) { $null = Remove-SSHSession -SSHSession $session -ErrorAction SilentlyContinue }
-    }
-
-    # Verify with the native ssh client (skipped for passphrase-protected keys) ----
-    $priv   = $PubPath -replace '\.pub$', ''
-    $ssh    = Get-Tool 'ssh'
-    $keygen = Get-Tool 'ssh-keygen'
-    if ($ssh -and $keygen -and (Test-Path -LiteralPath $priv)) {
-        $probe = Invoke-Native -File $keygen -Arguments @('-y', '-P', '', '-f', $priv)
-        if ($probe.ExitCode -ne 0) {
-            Write-Info 'Private key has a passphrase - automatic login test skipped.'
-        }
-        else {
-            Write-Info 'Testing key-based login...'
-            $t = Invoke-Native -File $ssh -Arguments @(
-                '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'IdentitiesOnly=yes',
-                '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10',
-                '-p', "$port", '-i', $priv, "$username@$server", 'echo KPT_OK')
-            if ($t.ExitCode -eq 0 -and $t.StdOut -match 'KPT_OK') { Write-Ok 'Key-based login works.' }
-            else {
-                $why = if ($t.StdErr) { ($t.StdErr -split "\r?\n")[-1] } else { "exit code $($t.ExitCode)" }
-                Write-Warn "Key installed, but the login test failed: $why"
-                Write-Info 'Check PubkeyAuthentication in sshd_config, SELinux contexts and home-directory permissions.'
-            }
+            if (-not $bulk) { throw }
+            Write-Err $_.Exception.Message
+            $results += [pscustomobject]@{ Host = $label; Ok = $false; Detail = $_.Exception.Message }
         }
     }
 
-    Write-Host ''
-    $portArg = if ($port -ne 22) { " -p $port" } else { '' }
-    Write-Info "Connect with:  ssh -i `"$priv`"$portArg ${username}@${server}"
+    if ($bulk) {
+        Write-Section 'Summary'
+        foreach ($r in $results) {
+            if ($r.Ok) { Write-Host "  $($script:G.Ok) " -NoNewline -ForegroundColor Green; Write-Host $r.Host.PadRight(34) -NoNewline -ForegroundColor White; Write-Host $r.Detail -ForegroundColor Green }
+            else       { Write-Host "  $($script:G.Err) " -NoNewline -ForegroundColor Red;   Write-Host $r.Host.PadRight(34) -NoNewline -ForegroundColor White; Write-Host $r.Detail -ForegroundColor Red }
+        }
+        $failed = @($results | Where-Object { -not $_.Ok }).Count
+        Write-Host ''
+        if ($failed -gt 0) { throw "$failed of $($results.Count) hosts failed." }
+        Write-Ok "All $($results.Count) hosts done."
+    }
+    else {
+        $priv    = $PubPath -replace '\.pub$', ''
+        $portArg = if ($entries[0].Port -ne 22) { " -p $($entries[0].Port)" } else { '' }
+        Write-Host ''
+        Write-Info "Connect with:  ssh -i `"$priv`"$portArg $($entries[0].User)@$($entries[0].Server)"
+    }
 }
 
 # ============================================================================
@@ -783,6 +1115,10 @@ function Show-Usage {
     Write-Host '    --host <ip|name> --port <n>    deploy target (port default 22)' -ForegroundColor Gray
     Write-Host '    --user <name> --password <pw>  deploy credentials (password prompted if omitted)' -ForegroundColor Gray
     Write-Host '    --key <name|path>              public key to deploy (default id_ed25519)' -ForegroundColor Gray
+    Write-Host '    --target <linux|esxi|mikrotik> server type (default linux)' -ForegroundColor Gray
+    Write-Host '    --host-list <file>             many hosts: host | host:port | user@host[:port]' -ForegroundColor Gray
+    Write-Host '    -AddToAgent                    load the new key into ssh-agent' -ForegroundColor Gray
+    Write-Host '    -DisablePasswordAuth           Linux: disable SSH password login after a verified key login' -ForegroundColor Gray
     Write-Host '    -Force  -AcceptHostKey  -Help' -ForegroundColor Gray
     Write-Host ''
 }
@@ -795,11 +1131,14 @@ function Merge-CliArguments {
         label = 'Label'; comment = 'Label'; name = 'Name'
         host = 'Server'; hostname = 'Server'; server = 'Server'; ip = 'Server'
         user = 'Username'; username = 'Username'; password = 'Password'; passphrase = 'Passphrase'
-        key = 'Key'; port = 'Port'
+        key = 'Key'; port = 'Port'; target = 'Target'
+        'host-list' = 'HostList'; hostlist = 'HostList'; hosts = 'HostList'
     }
     $switchOptions = @{
         generate = 'Generate'; list = 'List'; deploy = 'Deploy'; force = 'Force'
         'accept-host-key' = 'AcceptHostKey'; accepthostkey = 'AcceptHostKey'; help = 'Help'
+        'add-to-agent' = 'AddToAgent'; addtoagent = 'AddToAgent'
+        'disable-password-auth' = 'DisablePasswordAuth'; disablepasswordauth = 'DisablePasswordAuth'
     }
 
     for ($i = 0; $i -lt $Tokens.Count; $i++) {
@@ -852,8 +1191,10 @@ $opts = @{
     Help          = $Help.IsPresent
     Force         = $Force.IsPresent
     AcceptHostKey = $AcceptHostKey.IsPresent
+    AddToAgent    = $AddToAgent.IsPresent
+    DisablePasswordAuth = $DisablePasswordAuth.IsPresent
 }
-foreach ($n in 'Type', 'Bits', 'Label', 'Name', 'Server', 'Username', 'Password', 'Passphrase', 'Key', 'Port') {
+foreach ($n in 'Type', 'Bits', 'Label', 'Name', 'Server', 'Username', 'Password', 'Passphrase', 'Key', 'Port', 'Target', 'HostList') {
     if ($PSBoundParameters.ContainsKey($n)) { $opts[$n] = $PSBoundParameters[$n] }
 }
 
@@ -865,6 +1206,7 @@ try {
         $opts.Type = "$($opts.Type)".ToLower()
         if ($opts.Type -notin 'ed25519', 'rsa', 'ecdsa') { throw "Unsupported type '$($opts.Type)'. Use ed25519, rsa or ecdsa." }
     }
+    if ($opts.Target) { $opts.Target = Resolve-Target $opts.Target }
     if ($opts.ContainsKey('Port') -and ($opts.Port -lt 1 -or $opts.Port -gt 65535)) { throw 'Port must be between 1 and 65535.' }
 
     if ($opts.Help) {
