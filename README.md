@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.5         │
+  │ Generate · List · Deploy        v1.3.6         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -137,7 +137,7 @@ An incompatible key is refused **before anything is uploaded**: immediately when
 
 #### MikroTik notes
 
-- **Use RSA unless you know the router is recent.** RouterOS rejects keys it cannot read with `unable to load key file (wrong format or bad passphrase)!`, both from the command line and in WinBox. That message almost always means an unsupported key type, not a damaged file: Ed25519 user keys are only accepted by newer 7.x releases (7.12 or newer is reported, sources differ), and ECDSA and security keys never are. The tool reads the RouterOS version before uploading: it refuses Ed25519 on RouterOS 6.x, warns on 7.0-7.11, and reports RouterOS's own answer instead of claiming success.
+- **Use RSA unless you know the router is recent.** RouterOS rejects keys it cannot read with `unable to load key file (wrong format or bad passphrase)!`, both from the command line and in WinBox. That message almost always means an unsupported key type, not a damaged file: Ed25519 user keys are only accepted by newer 7.x releases (7.12 or newer is reported, sources differ), and ECDSA and security keys never are. The tool reads the RouterOS version before uploading: it refuses Ed25519 on RouterOS 6.x, warns on 7.0-7.11, and reports RouterOS's own answer instead of claiming success. If the version cannot be read it says so once (run with `-Verbose` to see the router's answer) and carries on.
 
   ```powershell
   .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik
@@ -240,6 +240,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Authentication failed for user@host* | Check username and password, and that password login is still enabled on the server (it is not after `-DisablePasswordAuth`). |
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
 | *Key-based login failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
+| *Could not read the RouterOS version* | Harmless: the deployment continues. v1.3.5 and older could not read the version on real routers (a bare `get` prints nothing over SSH); fixed in 1.3.6. If it still appears, run with `-Verbose` and look at the answer for `:put [/system resource get version]`. |
 | MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\SshKeyKit.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
 | *The term 'New-SSHSession' is not recognized* (v1.3.4 and older) / *Could not install Posh-SSH* | The Posh-SSH module is missing. v1.3.5 offers to install it; if that fails (no access to the PowerShell Gallery, old PowerShellGet), install it yourself with `Install-Module -Name Posh-SSH -Scope CurrentUser -Force`. On an offline machine copy the `Posh-SSH` folder from the [Posh-SSH repository](https://github.com/darkoperator/Posh-SSH) into `$HOME\Documents\WindowsPowerShell\Modules\` (Windows PowerShell) or `$HOME\Documents\PowerShell\Modules\` (PowerShell 7). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
@@ -255,7 +256,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | Generate, List, ssh-agent loading | Verified |
 | Deploy to Linux (single, batch, OS detection, disabling password login) | Verified |
 | Deploy to VMware ESXi (ECDSA / RSA keys; Ed25519 is refused) | Verified |
-| Deploy to MikroTik RouterOS | Implemented; not yet fully verified on real hardware |
+| Deploy to MikroTik RouterOS (RSA; Ed25519 on RouterOS releases that support it) | Verified |
 | Cisco IOS / IOS-XE, FortiGate | Not supported |
 
 Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not support IPv6 addresses.
@@ -270,6 +271,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.3.6** | MikroTik: the RouterOS version is now read correctly (`:put [...]`, with a fallback and terminal-control-code stripping), so the Ed25519 version check and the *Detected:* line work on real routers. Marked verified on real hardware. |
 | **1.3.5** | Fix: the Posh-SSH module was never loaded or offered for installation when it was missing, which ended in *The term 'New-SSHSession' is not recognized*. It is now checked at the start of every deploy, installed on request, and a failed installation shows the manual command. |
 | **1.3.4** | MikroTik: waits for the uploaded file to be complete, verifies that the key was really added (no more false *Key installed*), reports leftover temp files, adds `-Verbose` diagnostics; an unconfirmed import with a failing key login is now a failed host. |
 | **1.3.3** | MikroTik: an import that RouterOS refuses (e.g. *unable to load key file*) is now reported as an error instead of "Key installed"; Ed25519 is checked against the RouterOS version; note about password login stopping after a key is imported. |

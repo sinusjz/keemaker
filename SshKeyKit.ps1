@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.5'
+$script:Version = '1.3.6'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -726,9 +726,8 @@ function Get-RemoteOs {
                 if (-not $label) { $label = 'VMware ESXi' }
             }
             'mikrotik' {
-                $v = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command '/system resource get version'
-                $ver = (@($v.Output) -join ' ').Trim()
-                $label = if ($ver -and $ver.Length -lt 40) { "MikroTik RouterOS $ver" } else { 'MikroTik RouterOS' }
+                $rv = Get-RosVersion -Session $Session
+                $label = if ($rv -and $rv.Text.Length -lt 40) { "MikroTik RouterOS $($rv.Text)" } else { 'MikroTik RouterOS' }
             }
             'cisco' { $label = 'Cisco IOS / IOS-XE' }
         }
@@ -818,9 +817,28 @@ function Install-KeyEsxi {
 function Invoke-RosValue {
     param($Session, [string]$Command)
     $r = Invoke-SSHCommand -SSHSession $Session -TimeOut 20 -Command $Command
-    $text = ((@($r.Output) + @($r.Error)) -join ' ').Trim()
+    $text = ((@($r.Output) + @($r.Error)) -join ' ')
+    # RouterOS may wrap answers in terminal control sequences; keep plain text only
+    $text = ($text -replace '\x1b\[[0-9;?]*[A-Za-z]', '' -replace '[\x00-\x1F\x7F]', ' ' -replace '\s{2,}', ' ').Trim()
     Write-Verbose "RouterOS> $Command   =>   $text"
     return $text
+}
+
+# RouterOS version, e.g. 7.16.1 (stable). A bare `/system resource get version` prints nothing over an SSH exec channel
+# (script context), so ask with :put and fall back to parsing `/system resource print`.
+function Get-RosVersion {
+    param($Session)
+    $t = Invoke-RosValue -Session $Session -Command ':put [/system resource get version]'
+    $m = [regex]::Match($t, '^[^\d]{0,3}(\d+)\.(\d+)')
+    if ($m.Success) { return [pscustomobject]@{ Text = $t; Major = [int]$m.Groups[1].Value; Minor = [int]$m.Groups[2].Value } }
+
+    $t = Invoke-RosValue -Session $Session -Command '/system resource print'
+    $m = [regex]::Match($t, 'version:\s*(\d+)\.(\d+)')
+    if ($m.Success) {
+        $text = [regex]::Match($t, 'version:\s*(\S+(?:\s+\([^)]*\))?)').Groups[1].Value
+        return [pscustomobject]@{ Text = $text; Major = [int]$m.Groups[1].Value; Minor = [int]$m.Groups[2].Value }
+    }
+    return $null
 }
 
 function Install-KeyMikrotik {
@@ -829,18 +847,16 @@ function Install-KeyMikrotik {
 
     # Ed25519 user keys: none on RouterOS 6; newer 7.x releases only (7.12+ is reported). Check before touching the device.
     if ($PubLine -match '^ssh-ed25519\s') {
-        $vr  = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command '/system resource get version'
-        $ver = (@($vr.Output) -join ' ').Trim()
-        if ($ver -match '^(\d+)\.(\d+)') {
-            $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-            if ($major -lt 7) {
-                throw "RouterOS $ver does not support Ed25519 keys. Use an RSA key instead:  .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik"
+        $rv = Get-RosVersion -Session $Session
+        if ($rv) {
+            if ($rv.Major -lt 7) {
+                throw "RouterOS $($rv.Text) does not support Ed25519 keys. Use an RSA key instead:  .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik"
             }
-            if ($major -eq 7 -and $minor -lt 12) {
-                Write-Warn "RouterOS $ver may reject Ed25519 keys (support is reported from 7.12; older releases answer 'unable to load key file'). If the import fails, use an RSA key."
+            if ($rv.Major -eq 7 -and $rv.Minor -lt 12) {
+                Write-Warn "RouterOS $($rv.Text) may reject Ed25519 keys (support is reported from 7.12; older releases answer 'unable to load key file'). If the import fails, use an RSA key."
             }
         }
-        else { Write-Warn 'Could not read the RouterOS version. Ed25519 keys need RouterOS 7.12 or newer (reported); older versions reject them.' }
+        else { Write-Warn "Could not read the RouterOS version (run with -Verbose to see the router's answer). Ed25519 keys need RouterOS 7.12 or newer (reported); older versions reject them." }
     }
 
     $remoteName = 'kpt-import.pub'
