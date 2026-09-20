@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.2         │
+  │ Generate · List · Deploy        v1.3.3         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -124,7 +124,7 @@ With `--target auto` (the default) the tool logs in, asks the server what it is,
 |---|---|---|
 | **Linux** (macOS/BSD hosts use the same layout; untested) | `~/.ssh/authorized_keys` | Creates `~/.ssh` (700) and the file (600), skips duplicates, repairs a missing trailing newline, restores SELinux contexts. |
 | **VMware ESXi** | `/etc/ssh/keys-<user>/authorized_keys` | Same logic, then runs `/sbin/auto-backup.sh` so the key survives a reboot. ESXi only accepts ECDSA and RSA keys (see below). |
-| **MikroTik RouterOS** | RouterOS user key store | Uploads the `.pub` over SFTP and runs `/user ssh-keys import`, then removes the temporary file. RSA keys work everywhere; Ed25519 needs a recent RouterOS 7.x; ECDSA is rejected. Default RouterOS settings only offer legacy SSH algorithms (see [below](#older-devices-that-only-offer-legacy-algorithms)). |
+| **MikroTik RouterOS** | RouterOS user key store | Uploads the `.pub` over SFTP and runs `/user ssh-keys import`, then removes the temporary file. RSA works everywhere; Ed25519 only on newer RouterOS 7.x (7.12 or newer is reported); ECDSA is rejected. Default RouterOS settings only offer legacy SSH algorithms (see [below](#older-devices-that-only-offer-legacy-algorithms)). |
 
 #### Key types per target
 
@@ -132,7 +132,7 @@ With `--target auto` (the default) the tool logs in, asks the server what it is,
 |---|---|---|---|
 | Linux | Yes | Yes | Yes |
 | ESXi | **No, refused** | Yes (P-256, P-384, P-521) | Yes |
-| MikroTik | Recent RouterOS 7.x only (warning shown) | **No, refused** | Yes |
+| MikroTik | RouterOS 7.12+ (reported); refused on 6.x | **No, refused** | Yes |
 
 ESXi's SSH server is FIPS-restricted and does not support Ed25519 on any version ([Broadcom KB 394011](https://knowledge.broadcom.com/external/article/394011/not-possible-to-implement-sshed25519-key.html)); it accepts ECDSA (`nistp256/384/521`) and RSA (`rsa-sha2-256/512`). Because Ed25519 is this tool's default, keys for ESXi need to be generated explicitly:
 
@@ -141,6 +141,17 @@ ESXi's SSH server is FIPS-restricted and does not support Ed25519 on any version
 ```
 
 An incompatible key is refused **before anything is uploaded**: immediately when you pass `--target esxi`, or right after detection when the target is `auto`. In a batch, only the affected hosts fail. To reach a mixed estate with a single key, use RSA or ECDSA for the ESXi hosts, or split them into a separate list with their own key.
+
+#### MikroTik notes
+
+- **Use RSA unless you know the router is recent.** RouterOS rejects keys it cannot read with `unable to load key file (wrong format or bad passphrase)!`, both from the command line and in WinBox. That message almost always means an unsupported key type, not a damaged file: Ed25519 user keys are only accepted by newer 7.x releases (7.12 or newer is reported, sources differ), and ECDSA and security keys never are. The tool reads the RouterOS version before uploading: it refuses Ed25519 on RouterOS 6.x, warns on 7.0-7.11, and reports RouterOS's own answer instead of claiming success.
+
+  ```powershell
+  .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik
+  .\SshKeyKit.ps1 -Deploy --key id_mikrotik --host 192.168.88.1 --user admin
+  ```
+
+- **Password login stops for that user.** By default RouterOS stops accepting a user's password over SSH once the user has a key (see `/ip ssh always-allow-password-login`). Keep your current session open until the login test confirms key login works.
 
 #### Detection
 
@@ -236,6 +247,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
 | *Key installed, but the login test failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
+| *unable to load key file (wrong format or bad passphrase)!* (MikroTik) | RouterOS cannot read the key, usually because of its type. Deploy an RSA key instead (see [MikroTik notes](#mikrotik-notes)). |
 | *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
 | *Could not identify the remote OS* | The device is not one of the supported types, or `uname` is unavailable. Pass `--target` explicitly if it is supported. |
 | Odd symbols in the banner | The tool falls back to ASCII automatically outside Windows Terminal or VS Code. Windows Terminal is recommended. |
@@ -262,6 +274,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.3.3** | MikroTik: an import that RouterOS refuses (e.g. *unable to load key file*) is now reported as an error instead of "Key installed"; Ed25519 is checked against the RouterOS version; note about password login stopping after a key is imported. |
 | **1.3.2** | Login test recognises algorithm-negotiation failures on legacy devices (e.g. default RouterOS), retries with the offered algorithms and explains the fix. |
 | **1.3.1** | Refuse Ed25519 keys for ESXi targets (unsupported by ESXi) with guidance to use ECDSA or RSA. |
 | **1.3.0** | Dedicated *Batch deploy* menu entry with a host-list format explanation. |

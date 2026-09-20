@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.2'
+$script:Version = '1.3.3'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -731,8 +731,7 @@ function Get-RemoteOs {
 function Assert-KeyFitsTarget {
     param([string]$Target, [string]$PubLine)
     if ($Target -eq 'mikrotik') {
-        if ($PubLine -match '^ecdsa-|^sk-') { throw 'RouterOS does not accept this key type. Use an RSA key (or Ed25519 on recent RouterOS 7.x).' }
-        if ($PubLine -match '^ssh-ed25519') { Write-Warn 'Ed25519 keys need a recent RouterOS 7.x; older versions only accept RSA.' }
+        if ($PubLine -match '^ecdsa-|^sk-') { throw 'RouterOS does not accept this key type (ECDSA and security keys are not supported). Use an RSA key, or Ed25519 on RouterOS 7.12 or newer.' }
     }
     if ($Target -eq 'esxi') {
         # ESXi's SSH server is FIPS-restricted to ECDSA (nistp256/384/521) and RSA (rsa-sha2-256/512) on all versions
@@ -805,8 +804,25 @@ function Install-KeyEsxi {
 }
 
 function Install-KeyMikrotik {
-    param($Session, [hashtable]$Connect, [string]$PubPath, [string]$Username)
+    param($Session, [hashtable]$Connect, [string]$PubPath, [string]$Username, [string]$PubLine = '')
     # RouterOS has no authorized_keys file: upload the .pub over SFTP, then import it for the user.
+
+    # Ed25519 user keys: none on RouterOS 6; newer 7.x releases only (7.12+ is reported). Check before touching the device.
+    if ($PubLine -match '^ssh-ed25519\s') {
+        $vr  = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command '/system resource get version'
+        $ver = (@($vr.Output) -join ' ').Trim()
+        if ($ver -match '^(\d+)\.(\d+)') {
+            $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+            if ($major -lt 7) {
+                throw "RouterOS $ver does not support Ed25519 keys. Use an RSA key instead:  .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik"
+            }
+            if ($major -eq 7 -and $minor -lt 12) {
+                Write-Warn "RouterOS $ver may reject Ed25519 keys (support is reported from 7.12; older releases answer 'unable to load key file'). If the import fails, use an RSA key."
+            }
+        }
+        else { Write-Warn 'Could not read the RouterOS version. Ed25519 keys need RouterOS 7.12 or newer (reported); older versions reject them.' }
+    }
+
     $remoteName = 'kpt-import.pub'
     $tmp  = Join-Path ([IO.Path]::GetTempPath()) $remoteName
     Copy-Item -LiteralPath $PubPath -Destination $tmp -Force
@@ -818,8 +834,19 @@ function Install-KeyMikrotik {
                    -Command "/user ssh-keys import public-key-file=$remoteName user=$Username"
         $out = (($res.Output + $res.Error) -join ' ').Trim()
         $null = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command "/file remove $remoteName"
+        # A successful import prints nothing. Anything else is either a known error or worth showing.
         if ($out -match 'already') { return 'present' }
-        if ($out -match 'fail|error|invalid|no such') { throw "RouterOS rejected the key: $out" }
+        if ($out -match 'unable to load|wrong format|bad passphrase|fail|error|invalid|no such|not supported|bad command|syntax|not enough permissions|denied') {
+            $msg = "RouterOS rejected the key: $out"
+            if ($out -match 'unable to load|wrong format') {
+                $nl = [Environment]::NewLine + '    '
+                $msg += ($nl + 'RouterOS could not read this key. Its type is usually the reason: RSA works everywhere, Ed25519 needs RouterOS 7.12 or newer,' +
+                         $nl + 'ECDSA and security keys are not supported. Generate an RSA key and deploy that one:' +
+                         $nl + '.\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik')
+            }
+            throw $msg
+        }
+        if ($out) { Write-Warn "RouterOS answered: $out  (not recognised as an error - the login test below will confirm)." }
         return 'added'
     }
     finally {
@@ -1021,12 +1048,15 @@ function Install-KeyOnHost {
         Write-Info 'Installing public key...'
         switch ($Target) {
             'esxi'     { $status = Install-KeyEsxi     -Session $session -PubLine $PubLine -Username $Username }
-            'mikrotik' { $status = Install-KeyMikrotik -Session $session -Connect $connect -PubPath $PubPath -Username $Username }
+            'mikrotik' { $status = Install-KeyMikrotik -Session $session -Connect $connect -PubPath $PubPath -Username $Username -PubLine $PubLine }
             default    { $status = Install-KeyLinux    -Session $session -PubLine $PubLine }
         }
         $where = switch ($Target) { 'esxi' { "/etc/ssh/keys-$Username/authorized_keys" } 'mikrotik' { "RouterOS user '$Username'" } default { '~/.ssh/authorized_keys' } }
         if ($status -eq 'present') { Write-Ok 'Key was already authorized on the server - nothing changed.' }
         else                       { Write-Ok "Key installed ($where) for ${Username}@${Server}." }
+        if ($status -eq 'added' -and $Target -eq 'mikrotik') {
+            Write-Info "RouterOS normally stops accepting this user's password over SSH once the user has a key (setting: /ip ssh always-allow-password-login). Keep your current session open until key login is confirmed."
+        }
     }
     finally {
         if ($session) { $null = Remove-SSHSession -SSHSession $session -ErrorAction SilentlyContinue }
