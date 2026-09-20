@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.1'
+$script:Version = '1.3.2'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -829,19 +829,38 @@ function Install-KeyMikrotik {
 }
 
 # --- login test ---------------------------------------------------------------------------------
+# Parses OpenSSH's "no matching MAC/cipher/key exchange method/host key type found. Their offer: ..." error, which
+# older devices (e.g. default RouterOS) trigger because they only offer algorithms modern OpenSSH refuses.
+function Get-NegotiationHint {
+    param([string]$StdErr)
+    if ($StdErr -match 'no matching (?<what>MAC|cipher|key exchange method|host key type) found\. Their offer: (?<offer>\S+)') {
+        $names = @{ 'mac' = 'MACs'; 'cipher' = 'Ciphers'; 'key exchange method' = 'KexAlgorithms'; 'host key type' = 'HostKeyAlgorithms' }
+        $what  = $Matches['what']
+        $offer = $Matches['offer']
+        if ($what.ToLower() -eq 'key exchange method') {
+            # OpenSSH lists protocol pseudo-entries here that are not valid in a KexAlgorithms setting
+            $offer = (($offer -split ',') | Where-Object { $_ -notmatch '^(ext-info-[cs]|kex-strict-[cs]-v00@openssh\.com)$' }) -join ','
+            if (-not $offer) { return $null }
+        }
+        return [pscustomobject]@{ What = $what; Offer = $offer; Option = $names[$what.ToLower()] }
+    }
+    return $null
+}
+
 function Invoke-KeyProbe {
-    param([string]$Ssh, [string]$Priv, [string]$Server, [int]$Port, [string]$Username, [string]$Target)
+    param([string]$Ssh, [string]$Priv, [string]$Server, [int]$Port, [string]$Username, [string]$Target, [string[]]$ExtraArgs = @())
     $probe = if ($Target -eq 'mikrotik') { ':put KPT_OK' } else { 'echo KPT_OK' }
-    $t = Invoke-Native -File $Ssh -Arguments @(
-        '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'IdentitiesOnly=yes',
-        '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10',
-        '-p', "$Port", '-i', $Priv, "$Username@$Server", $probe)
+    $sshArgs = @('-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'IdentitiesOnly=yes',
+                 '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10') + $ExtraArgs +
+               @('-p', "$Port", '-i', $Priv, "$Username@$Server", $probe)
+    $t = Invoke-Native -File $Ssh -Arguments $sshArgs
     return [pscustomobject]@{ Ok = ($t.ExitCode -eq 0 -and $t.StdOut -match 'KPT_OK'); StdErr = $t.StdErr; ExitCode = $t.ExitCode }
 }
 
-# returns 'ok' | 'failed' | 'skipped'
+# returns 'ok' | 'legacy' (works only with legacy algorithms) | 'failed' | 'skipped'
 function Test-KeyLogin {
     param([string]$PubPath, [string]$Server, [int]$Port, [string]$Username, [string]$Target)
+    $script:NegotiationOptions = ''
     $priv   = $PubPath -replace '\.pub$', ''
     $ssh    = Get-Tool 'ssh'
     $keygen = Get-Tool 'ssh-keygen'
@@ -856,6 +875,27 @@ function Test-KeyLogin {
     Write-Info 'Testing key-based login...'
     $r = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target $Target
     if ($r.Ok) { Write-Ok 'Key-based login works.'; return 'ok' }
+
+    # Some devices only offer algorithms that modern OpenSSH refuses by default. This is not a key problem:
+    # retry the test with exactly the algorithms the device offers (for this test only) and report it.
+    $extra = @(); $shown = @(); $found = @()
+    for ($i = 0; $i -lt 4 -and -not $r.Ok; $i++) {
+        $hint = Get-NegotiationHint -StdErr $r.StdErr
+        if (-not $hint) { break }
+        $extra += @('-o', "$($hint.Option)=+$($hint.Offer)")
+        $shown += "-o `"$($hint.Option)=+$($hint.Offer)`""
+        $found += "$($hint.What): $($hint.Offer)"
+        $r = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target $Target -ExtraArgs $extra
+    }
+    if ($r.Ok -and $extra.Count -gt 0) {
+        $script:NegotiationOptions = ($shown -join ' ')
+        Write-Warn "Key login works, but only with legacy SSH algorithms that OpenSSH refuses by default ($($found -join '; '))."
+        Write-Info 'This is not a problem with the key or the upload. The device just offers old, weak algorithms.'
+        if ($Target -eq 'mikrotik') { Write-Info 'On RouterOS 7.x you can enable modern ones:  /ip ssh set strong-crypto=yes   (keep a console session open; it can lock out old SSH clients)' }
+        else                        { Write-Info 'Recommended: enable modern SSH algorithms on the device.' }
+        Write-Info "To connect until then, add:  $($script:NegotiationOptions)"
+        return 'legacy'
+    }
     $why = if ($r.StdErr) { ($r.StdErr -split "\r?\n")[-1] } else { "exit code $($r.ExitCode)" }
     Write-Warn "Key installed, but the login test failed: $why"
     Write-Info 'Check PubkeyAuthentication, SELinux contexts and home-directory permissions on the server.'
@@ -996,7 +1036,9 @@ function Install-KeyOnHost {
 
     if ($Target -eq 'linux' -and ($DisablePw -or $AskDisablePw)) {
         if ($login -ne 'ok') {
-            Write-Warn 'Password login was NOT disabled: key-based login has not been verified, and disabling it now could lock you out.'
+            $why = if ($login -eq 'legacy') { 'this server only works with legacy SSH algorithms, which this tool does not use for changing server settings' }
+                   else                     { 'key-based login has not been verified, and disabling it now could lock you out' }
+            Write-Warn "Password login was NOT disabled: $why."
         }
         else {
             $go = $DisablePw
@@ -1008,7 +1050,7 @@ function Install-KeyOnHost {
             if ($go) { Disable-PasswordAuth -Server $Server -Port $Port -Username $Username -Secure $Secure -PubPath $PubPath }
         }
     }
-    return [pscustomobject]@{ Status = $status; Login = $login; Target = $Target }
+    return [pscustomobject]@{ Status = $status; Login = $login; Target = $Target; SshOptions = $script:NegotiationOptions }
 }
 
 function Show-HostListHelp {
@@ -1152,6 +1194,7 @@ function Invoke-Deploy {
 
     # Go ---------------------------------------------------------------------------------
     $results = @()
+    $sshOptions = ''
     $i = 0
     foreach ($e in $entries) {
         $i++
@@ -1165,7 +1208,8 @@ function Invoke-Deploy {
             $r = Install-KeyOnHost -Target $target -Server $e.Server -Port $e.Port -Username $e.User -Secure $secure `
                     -PubPath $PubPath -PubLine $pubLine -AcceptKey $acceptKey -DisablePw $disablePw -AskDisablePw $askDisable -Ask ($Interactive -and -not $bulk)
             $detail = "[$($r.Target)] " + $(if ($r.Status -eq 'present') { 'key was already present' } else { 'key installed' })
-            $detail += switch ($r.Login) { 'ok' { ', login verified' } 'failed' { ', login test FAILED' } default { '' } }
+            $detail += switch ($r.Login) { 'ok' { ', login verified' } 'legacy' { ', login OK only with legacy algorithms' } 'failed' { ', login test FAILED' } default { '' } }
+            $sshOptions = $r.SshOptions
             $results += [pscustomobject]@{ Host = $label; Ok = $true; Detail = $detail }
         }
         catch {
@@ -1190,7 +1234,8 @@ function Invoke-Deploy {
         $priv    = $PubPath -replace '\.pub$', ''
         $portArg = if ($entries[0].Port -ne 22) { " -p $($entries[0].Port)" } else { '' }
         Write-Host ''
-        Write-Info "Connect with:  ssh -i `"$priv`"$portArg $($entries[0].User)@$($entries[0].Server)"
+        $optArg = if ($sshOptions) { " $sshOptions" } else { '' }
+        Write-Info "Connect with:  ssh$optArg -i `"$priv`"$portArg $($entries[0].User)@$($entries[0].Server)"
     }
 }
 

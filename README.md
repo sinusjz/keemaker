@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.1         │
+  │ Generate · List · Deploy        v1.3.2         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -124,7 +124,7 @@ With `--target auto` (the default) the tool logs in, asks the server what it is,
 |---|---|---|
 | **Linux** (macOS/BSD hosts use the same layout; untested) | `~/.ssh/authorized_keys` | Creates `~/.ssh` (700) and the file (600), skips duplicates, repairs a missing trailing newline, restores SELinux contexts. |
 | **VMware ESXi** | `/etc/ssh/keys-<user>/authorized_keys` | Same logic, then runs `/sbin/auto-backup.sh` so the key survives a reboot. ESXi only accepts ECDSA and RSA keys (see below). |
-| **MikroTik RouterOS** | RouterOS user key store | Uploads the `.pub` over SFTP and runs `/user ssh-keys import`, then removes the temporary file. RSA keys work everywhere; Ed25519 needs a recent RouterOS 7.x; ECDSA is rejected. |
+| **MikroTik RouterOS** | RouterOS user key store | Uploads the `.pub` over SFTP and runs `/user ssh-keys import`, then removes the temporary file. RSA keys work everywhere; Ed25519 needs a recent RouterOS 7.x; ECDSA is rejected. Default RouterOS settings only offer legacy SSH algorithms (see [below](#older-devices-that-only-offer-legacy-algorithms)). |
 
 #### Key types per target
 
@@ -181,6 +181,29 @@ backup@10.0.0.5:2200
 
 After installing the key the tool tries a key-only login and reports the result. The test is skipped, with a hint, for passphrase-protected keys that are not loaded in ssh-agent (`ssh-add <key>` or generate with `-AddToAgent`).
 
+### Older devices that only offer legacy algorithms
+
+Some devices, notably RouterOS with default settings, only offer old SSH algorithms that current OpenSSH clients refuse by default:
+
+```text
+Unable to negotiate with x.x.x.x port 22: no matching MAC found. Their offer: hmac-sha1,hmac-md5
+```
+
+The key upload uses Posh-SSH, whose library still speaks these algorithms, so **the upload works**; only the OpenSSH-based login test is affected. The tool recognises this error (for a MAC, cipher, key exchange method or host key type), retries the login test allowing exactly the algorithms the device offers, and reports the outcome:
+
+- a yellow warning *"Key login works, but only with legacy SSH algorithms"* with the `-o` options that are needed;
+- the "Connect with" line then includes those options, so it can be copied as is;
+- the retry only affects that single test connection (key authentication, no password is sent);
+- `-DisablePasswordAuth` is refused for such servers.
+
+The real fix is on the device. On RouterOS 7.x enable modern algorithms with:
+
+```text
+/ip ssh set strong-crypto=yes
+```
+
+Keep a console session open while you do this, because old SSH clients may stop working. (Reports say the setting does not help on RouterOS 6.x.) To connect by hand meanwhile, quote the value in PowerShell so the comma does not split the argument: `ssh -o "MACs=+hmac-sha1,hmac-md5" user@host`.
+
 ### Disabling password login (opt-in, Linux only)
 
 `-DisablePasswordAuth` (or the question shown after a successful single deploy) turns off SSH password authentication on the server. It is deliberately conservative:
@@ -198,6 +221,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 - Prefer the interactive prompts over `--password` and `--passphrase`: command-line values end up in shell history (the tool warns you).
 - The passphrase is handed to `ssh-keygen` as a command-line argument, so it is briefly visible to other processes on the same machine. Acceptable on a single-user admin workstation; loading the key into ssh-agent means you type it once.
 - **Host keys:** by default Posh-SSH shows the server fingerprint and asks you to confirm it. Answer *Y* only if it matches. `-AcceptHostKey` skips the question, so use it only on networks you trust. The final login test uses OpenSSH's `StrictHostKeyChecking=accept-new`, which records unknown host keys in your `known_hosts`.
+- For devices that only offer legacy algorithms the login test may retry with those algorithms (see above). That connection uses key authentication only and runs a harmless `echo`, but the algorithms are weak, so fix the device rather than relying on it.
 - Only the **public** key is ever uploaded. The password is used for the connection and, when disabling password login, for `sudo`.
 - Recommended key types: Ed25519, or RSA with 3072+ bits. ESXi is the exception: use ECDSA or RSA there.
 
@@ -211,6 +235,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Authentication failed for user@host* | Check username and password, and that password login is still enabled on the server (it is not after `-DisablePasswordAuth`). |
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
 | *Key installed, but the login test failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
+| *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
 | *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
 | *Could not identify the remote OS* | The device is not one of the supported types, or `uname` is unavailable. Pass `--target` explicitly if it is supported. |
 | Odd symbols in the banner | The tool falls back to ASCII automatically outside Windows Terminal or VS Code. Windows Terminal is recommended. |
@@ -221,8 +246,8 @@ Keep your current session open until you have confirmed you can still log in. A 
 |---|---|
 | Generate, List, ssh-agent loading | Verified |
 | Deploy to Linux (single, batch, OS detection, disabling password login) | Verified |
-| Deploy to VMware ESXi | Implemented; not yet verified on real hardware |
-| Deploy to MikroTik RouterOS | Implemented; not yet verified on real hardware |
+| Deploy to VMware ESXi (ECDSA / RSA keys; Ed25519 is refused) | Verified |
+| Deploy to MikroTik RouterOS | Implemented; not yet fully verified on real hardware |
 | Cisco IOS / IOS-XE, FortiGate | Not supported |
 
 Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not support IPv6 addresses.
@@ -237,6 +262,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.3.2** | Login test recognises algorithm-negotiation failures on legacy devices (e.g. default RouterOS), retries with the offered algorithms and explains the fix. |
 | **1.3.1** | Refuse Ed25519 keys for ESXi targets (unsupported by ESXi) with guidance to use ECDSA or RSA. |
 | **1.3.0** | Dedicated *Batch deploy* menu entry with a host-list format explanation. |
 | **1.2.0** | Automatic remote OS detection (`--target auto` is the default). |
