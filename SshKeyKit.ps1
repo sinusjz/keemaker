@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.0'
+$script:Version = '1.3.1'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -733,6 +733,15 @@ function Assert-KeyFitsTarget {
     if ($Target -eq 'mikrotik') {
         if ($PubLine -match '^ecdsa-|^sk-') { throw 'RouterOS does not accept this key type. Use an RSA key (or Ed25519 on recent RouterOS 7.x).' }
         if ($PubLine -match '^ssh-ed25519') { Write-Warn 'Ed25519 keys need a recent RouterOS 7.x; older versions only accept RSA.' }
+    }
+    if ($Target -eq 'esxi') {
+        # ESXi's SSH server is FIPS-restricted to ECDSA (nistp256/384/521) and RSA (rsa-sha2-256/512) on all versions
+        # (Broadcom KB 394011). Ed25519 can never authenticate there, so refuse before touching the server.
+        if ($PubLine -match '^(ssh-ed25519|sk-ssh-ed25519@openssh\.com)\s') {
+            throw ("ESXi does not support Ed25519 keys (all versions; its SSH server only accepts ECDSA and RSA - Broadcom KB 394011). " +
+                   "Generate an ECDSA or RSA key instead, e.g.:  .\SshKeyKit.ps1 -Generate --type ecdsa --name id_esxi")
+        }
+        if ($PubLine -match '^sk-ecdsa-') { Write-Warn 'Security-key (sk-) keys are not in ESXi''s documented list of supported algorithms and will probably be rejected.' }
     }
 }
 

@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.0         │
+  │ Generate · List · Deploy        v1.3.1         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -123,8 +123,26 @@ With `--target auto` (the default) the tool logs in, asks the server what it is,
 | Detected | Where the key goes | How |
 |---|---|---|
 | **Linux** (macOS/BSD hosts use the same layout; untested) | `~/.ssh/authorized_keys` | Creates `~/.ssh` (700) and the file (600), skips duplicates, repairs a missing trailing newline, restores SELinux contexts. |
-| **VMware ESXi** | `/etc/ssh/keys-<user>/authorized_keys` | Same logic, then runs `/sbin/auto-backup.sh` so the key survives a reboot. |
+| **VMware ESXi** | `/etc/ssh/keys-<user>/authorized_keys` | Same logic, then runs `/sbin/auto-backup.sh` so the key survives a reboot. ESXi only accepts ECDSA and RSA keys (see below). |
 | **MikroTik RouterOS** | RouterOS user key store | Uploads the `.pub` over SFTP and runs `/user ssh-keys import`, then removes the temporary file. RSA keys work everywhere; Ed25519 needs a recent RouterOS 7.x; ECDSA is rejected. |
+
+#### Key types per target
+
+| Target | Ed25519 (default) | ECDSA | RSA |
+|---|---|---|---|
+| Linux | Yes | Yes | Yes |
+| ESXi | **No, refused** | Yes (P-256, P-384, P-521) | Yes |
+| MikroTik | Recent RouterOS 7.x only (warning shown) | **No, refused** | Yes |
+
+ESXi's SSH server is FIPS-restricted and does not support Ed25519 on any version ([Broadcom KB 394011](https://knowledge.broadcom.com/external/article/394011/not-possible-to-implement-sshed25519-key.html)); it accepts ECDSA (`nistp256/384/521`) and RSA (`rsa-sha2-256/512`). Because Ed25519 is this tool's default, keys for ESXi need to be generated explicitly:
+
+```powershell
+.\SshKeyKit.ps1 -Generate --type ecdsa --name id_esxi        # or: --type rsa --bits 4096
+```
+
+An incompatible key is refused **before anything is uploaded**: immediately when you pass `--target esxi`, or right after detection when the target is `auto`. In a batch, only the affected hosts fail. To reach a mixed estate with a single key, use RSA or ECDSA for the ESXi hosts, or split them into a separate list with their own key.
+
+#### Detection
 
 Detection uses `uname -s` as the main probe and the SSH banner as a cross-check. If the result is conclusive it is used; if not:
 
@@ -181,7 +199,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 - The passphrase is handed to `ssh-keygen` as a command-line argument, so it is briefly visible to other processes on the same machine. Acceptable on a single-user admin workstation; loading the key into ssh-agent means you type it once.
 - **Host keys:** by default Posh-SSH shows the server fingerprint and asks you to confirm it. Answer *Y* only if it matches. `-AcceptHostKey` skips the question, so use it only on networks you trust. The final login test uses OpenSSH's `StrictHostKeyChecking=accept-new`, which records unknown host keys in your `known_hosts`.
 - Only the **public** key is ever uploaded. The password is used for the connection and, when disabling password login, for `sudo`.
-- Recommended key types: Ed25519, or RSA with 3072+ bits.
+- Recommended key types: Ed25519, or RSA with 3072+ bits. ESXi is the exception: use ECDSA or RSA there.
 
 ## Troubleshooting
 
@@ -193,6 +211,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Authentication failed for user@host* | Check username and password, and that password login is still enabled on the server (it is not after `-DisablePasswordAuth`). |
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
 | *Key installed, but the login test failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
+| *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
 | *Could not identify the remote OS* | The device is not one of the supported types, or `uname` is unavailable. Pass `--target` explicitly if it is supported. |
 | Odd symbols in the banner | The tool falls back to ASCII automatically outside Windows Terminal or VS Code. Windows Terminal is recommended. |
 
@@ -218,6 +237,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.3.1** | Refuse Ed25519 keys for ESXi targets (unsupported by ESXi) with guidance to use ECDSA or RSA. |
 | **1.3.0** | Dedicated *Batch deploy* menu entry with a host-list format explanation. |
 | **1.2.0** | Automatic remote OS detection (`--target auto` is the default). |
 | **1.1.0** | ssh-agent loading, opt-in password-login disabling, host-key hardening, ESXi and RouterOS targets, bulk deploy. CRLF-safe remote scripts. |
