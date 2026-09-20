@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.4         │
+  │ Generate · List · Deploy        v1.3.5         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -34,23 +34,15 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 |---|---|
 | Windows PowerShell 5.1 or PowerShell 7 | Also runs on PowerShell 7 for Linux/macOS (uses `~/.ssh`). No administrator rights needed. |
 | OpenSSH Client | Provides `ssh-keygen`, `ssh` and `ssh-add`. Included in current Windows 10/11; see [Troubleshooting](#troubleshooting) if it is missing. |
-| [Posh-SSH](https://github.com/darkoperator/Posh-SSH) module | Only for deploying. Offered for installation (current user only) the first time you deploy. |
+| [Posh-SSH](https://github.com/darkoperator/Posh-SSH) module | Only for deploying. Checked at the start of every deploy; if missing, you are offered a per-user installation (offline machines: see [Troubleshooting](#troubleshooting)). |
 
 ## Quick start
 
 1. Download `SshKeyKit.ps1` somewhere (or clone this repository).
-2. Open PowerShell (Windows Terminal gives the best look) and run:
+2. Open Windows Terminal and run:
 
 ```powershell
-.\SshKeyKit.ps1
-```
-
-If Windows blocks the script ("running scripts is disabled"):
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass .\KeyPairTool.ps1   # this window only
-powershell -ExecutionPolicy Bypass -File .\KeyPairTool_v1.ps1                  # one-off run without changing any setting
-Unblock-File .\SshKeyKit.ps1                                                   # if the file was downloaded
+powershell -ExecutionPolicy Bypass -File .\SshKeyKit.ps1      # one-off run without changing any setting
 ```
 
 Keys are read from and written to `%USERPROFILE%\.ssh`.
@@ -249,6 +241,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
 | *Key-based login failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
 | MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\SshKeyKit.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
+| *The term 'New-SSHSession' is not recognized* (v1.3.4 and older) / *Could not install Posh-SSH* | The Posh-SSH module is missing. v1.3.5 offers to install it; if that fails (no access to the PowerShell Gallery, old PowerShellGet), install it yourself with `Install-Module -Name Posh-SSH -Scope CurrentUser -Force`. On an offline machine copy the `Posh-SSH` folder from the [Posh-SSH repository](https://github.com/darkoperator/Posh-SSH) into `$HOME\Documents\WindowsPowerShell\Modules\` (Windows PowerShell) or `$HOME\Documents\PowerShell\Modules\` (PowerShell 7). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
 | *unable to load key file (wrong format or bad passphrase)!* (MikroTik) | RouterOS cannot read the key, usually because of its type. Deploy an RSA key instead (see [MikroTik notes](#mikrotik-notes)). |
 | *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
@@ -277,6 +270,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.3.5** | Fix: the Posh-SSH module was never loaded or offered for installation when it was missing, which ended in *The term 'New-SSHSession' is not recognized*. It is now checked at the start of every deploy, installed on request, and a failed installation shows the manual command. |
 | **1.3.4** | MikroTik: waits for the uploaded file to be complete, verifies that the key was really added (no more false *Key installed*), reports leftover temp files, adds `-Verbose` diagnostics; an unconfirmed import with a failing key login is now a failed host. |
 | **1.3.3** | MikroTik: an import that RouterOS refuses (e.g. *unable to load key file*) is now reported as an error instead of "Key installed"; Ed25519 is checked against the RouterOS version; note about password login stopping after a key is imported. |
 | **1.3.2** | Login test recognises algorithm-negotiation failures on legacy devices (e.g. default RouterOS), retries with the offered algorithms and explains the fix. |

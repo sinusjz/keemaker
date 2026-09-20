@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.4'
+$script:Version = '1.3.5'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -623,10 +623,13 @@ function Invoke-Generate {
 #  Action: Deploy
 # ============================================================================
 function Initialize-PoshSsh {
+    # Already loaded, or loadable on demand from the module path?
+    if (Get-Command New-SSHSession -ErrorAction SilentlyContinue) { return }
     if (Get-Module -ListAvailable -Name Posh-SSH) {
-        Import-Module Posh-SSH -ErrorAction Stop
+        Import-Module Posh-SSH -Global -ErrorAction Stop
         return
     }
+
     Write-Warn "The 'Posh-SSH' module (needed for password-based upload) is not installed."
     if (-not $Force) {
         if (-not (Read-Confirm 'Install it from the PowerShell Gallery for the current user?' $true)) {
@@ -640,10 +643,18 @@ function Initialize-PoshSsh {
             $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
         }
         Install-Module -Name Posh-SSH -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-        Import-Module Posh-SSH -ErrorAction Stop
+        Import-Module Posh-SSH -Global -ErrorAction Stop
+        if (-not (Get-Command New-SSHSession -ErrorAction SilentlyContinue)) {
+            throw 'the module installed but its commands are not available - close this PowerShell window, open a new one and run the tool again'
+        }
         Write-Ok 'Posh-SSH installed.'
     }
-    catch { throw "Could not install Posh-SSH: $(Get-RootMessage $_.Exception)" }
+    catch {
+        $nl = [Environment]::NewLine + '    '
+        throw ("Could not install Posh-SSH: $(Get-RootMessage $_.Exception)" +
+               $nl + 'Install it yourself, then run this tool again:' +
+               $nl + 'Install-Module -Name Posh-SSH -Scope CurrentUser -Force')
+    }
 }
 
 function Assert-HostReachable {
@@ -1041,6 +1052,7 @@ function Install-KeyOnHost {
         [string]$PubPath, [string]$PubLine, [bool]$AcceptKey, [bool]$DisablePw, [bool]$AskDisablePw, [bool]$Ask = $false
     )
 
+    Initialize-PoshSsh
     Write-Info "Checking ${Server}:${Port} ..."
     $banner = Assert-HostReachable -Server $Server -Port $Port
     Write-Ok 'Host is reachable.'
@@ -1194,6 +1206,9 @@ function Invoke-Deploy {
     $pubLine = $pubLine.Trim()
     Write-Info "Key: $PubPath"
     Write-Host ''
+
+    # Needed for the password login and the upload; offers to install the module on first use.
+    Initialize-PoshSsh
 
     # Target type ---------------------------------------------------------------
     $target = 'auto'
