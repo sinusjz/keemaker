@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.6         │
+  │ Generate · List · Deploy        v1.4.0         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -71,7 +71,7 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 # List
 .\SshKeyKit.ps1 -List
 
-# Deploy to one server (password is prompted if --password is omitted)
+# Deploy to one server (the password is prompted, hidden, if -Password is omitted)
 .\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user admin --key id_ed25519
 
 # Generate a key and deploy it in one go
@@ -90,13 +90,13 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 | `--bits` (`--byte`, `--length`, `--size`) | RSA: 2048-16384, default 4096 (a warning is shown below 3072). ECDSA: 256, 384 or 521, default 384. Ignored for Ed25519. |
 | `--label` (`--comment`) | Key comment. Default: `user@computer`. |
 | `--name` | File name inside `.ssh`. Default: `id_<type>`. Letters, digits, `.`, `_` and `-` only. |
-| `--passphrase` | Optional passphrase (at least 5 characters). Prefer the interactive prompt. |
+| `-Passphrase` | Optional key passphrase (at least 5 characters) as a **SecureString**. Prompted in the menu. |
 | `-AddToAgent` | Load the generated key into ssh-agent. |
 | `--host` (`--hostname`, `--server`, `--ip`) | Server to deploy to. |
 | `--host-list` | Text file with many servers (see below). |
 | `--port` | SSH port. Default: 22. |
 | `--user` (`--username`) | Login user (default user for a host list). |
-| `--password` | Login password. Prompted (hidden) when omitted, which is recommended. |
+| `-Password` | Login password as a **SecureString**. Prompted (hidden) when omitted. |
 | `--key` | Name or path of the public key to deploy. Default: `id_ed25519`. |
 | `--target` | `auto` (default), `linux`, `esxi` or `mikrotik` (alias `routeros`). An explicit value skips OS detection. |
 | `-DisablePasswordAuth` | Linux only: turn off SSH password login after a verified key login. |
@@ -104,6 +104,25 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 | `-Force` | Overwrite an existing key and skip confirmation prompts (including installing Posh-SSH). |
 | `-Verbose` | Show every RouterOS command and answer while deploying (useful for troubleshooting). |
 | `-Help` | Show a short usage summary. |
+
+#### Passing passwords and passphrases
+
+`-Password` and `-Passphrase` only accept a **SecureString**. Plain text (`-Password abc`, `--password abc`, `--password=abc`) is refused, because command-line values end up in shell history and process lists. Typical ways to supply one:
+
+```powershell
+# type it once, reuse it for several runs
+$pw = Read-Host -AsSecureString "Router password"
+.\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin -Password $pw
+
+# from a credential object
+$cred = Get-Credential admin
+.\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user $cred.UserName -Password $cred.Password
+
+# from a secret store (e.g. Microsoft.PowerShell.SecretManagement), if the secret is stored as a SecureString
+.\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user admin -Password (Get-Secret -Name RouterAdmin)
+```
+
+If you omit them, the tool prompts with hidden input.
 
 Exit codes: `0` success, `1` error or, in batch mode, at least one failed host.
 
@@ -125,7 +144,7 @@ With `--target auto` (the default) the tool logs in, asks the server what it is,
 |---|---|---|---|
 | Linux | Yes | Yes | Yes |
 | ESXi | **No, refused** | Yes (P-256, P-384, P-521) | Yes |
-| MikroTik | RouterOS 7.12+ (reported); refused on 6.x | **No, refused** | Yes |
+| MikroTik | RouterOS 7.12+ (reported; rejected on 7.8, accepted on 7.24.2); refused on 6.x | **No, refused** | Yes |
 
 ESXi's SSH server is FIPS-restricted and does not support Ed25519 on any version ([Broadcom KB 394011](https://knowledge.broadcom.com/external/article/394011/not-possible-to-implement-sshed25519-key.html)); it accepts ECDSA (`nistp256/384/521`) and RSA (`rsa-sha2-256/512`). Because Ed25519 is this tool's default, keys for ESXi need to be generated explicitly:
 
@@ -144,7 +163,7 @@ An incompatible key is refused **before anything is uploaded**: immediately when
   .\SshKeyKit.ps1 -Deploy --key id_mikrotik --host 192.168.88.1 --user admin
   ```
 
-- **The import is verified, not assumed.** The tool waits until the uploaded file is complete on the router, imports it, and checks that the user's key count went up. If RouterOS answers with an error, the error is shown. If RouterOS answers with nothing but no new key appears, the tool says so (*did not report a new key*) instead of claiming success, and a failing key login then marks the host as failed. Run with `-Verbose` to see every command and answer. Observed: RouterOS 7.8 rejects Ed25519 user keys.
+- **The import is verified, not assumed.** The tool waits until the uploaded file is complete on the router, imports it, and checks that the user's key count went up. If RouterOS answers with an error, the error is shown. If RouterOS answers with nothing but no new key appears, the tool says so (*did not report a new key*) instead of claiming success, and a failing key login then marks the host as failed. Run with `-Verbose` to see every command and answer. Observed on real routers: RouterOS 7.8 rejects Ed25519 user keys, 7.24.2 accepts them.
 - **Password login stops for that user.** By default RouterOS stops accepting a user's password over SSH once the user has a key (see `/ip ssh always-allow-password-login`). Keep your current session open until the login test confirms key login works.
 
 #### Detection
@@ -223,7 +242,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 
 ## Security notes
 
-- Prefer the interactive prompts over `--password` and `--passphrase`: command-line values end up in shell history (the tool warns you).
+- Passwords and passphrases are never accepted as plain text on the command line: `-Password` / `-Passphrase` take a `SecureString`, and `--password=...` is rejected, so secrets stay out of shell history and process lists. See [Passing passwords and passphrases](#passing-passwords-and-passphrases).
 - The passphrase is handed to `ssh-keygen` as a command-line argument, so it is briefly visible to other processes on the same machine. Acceptable on a single-user admin workstation; loading the key into ssh-agent means you type it once.
 - **Host keys:** by default Posh-SSH shows the server fingerprint and asks you to confirm it. Answer *Y* only if it matches. `-AcceptHostKey` skips the question, so use it only on networks you trust. The final login test uses OpenSSH's `StrictHostKeyChecking=accept-new`, which records unknown host keys in your `known_hosts`.
 - For devices that only offer legacy algorithms the login test may retry with those algorithms (see above). That connection uses key authentication only and runs a harmless `echo`, but the algorithms are weak, so fix the device rather than relying on it.
@@ -245,6 +264,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *The term 'New-SSHSession' is not recognized* (v1.3.4 and older) / *Could not install Posh-SSH* | The Posh-SSH module is missing. v1.3.5 offers to install it; if that fails (no access to the PowerShell Gallery, old PowerShellGet), install it yourself with `Install-Module -Name Posh-SSH -Scope CurrentUser -Force`. On an offline machine copy the `Posh-SSH` folder from the [Posh-SSH repository](https://github.com/darkoperator/Posh-SSH) into `$HOME\Documents\WindowsPowerShell\Modules\` (Windows PowerShell) or `$HOME\Documents\PowerShell\Modules\` (PowerShell 7). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
 | *unable to load key file (wrong format or bad passphrase)!* (MikroTik) | RouterOS cannot read the key, usually because of its type. Deploy an RSA key instead (see [MikroTik notes](#mikrotik-notes)). |
+| *Cannot process argument transformation on parameter 'Password'* (or `'Passphrase'`) | You passed plain text. Use a SecureString: `-Password (Read-Host -AsSecureString)`, a credential object or a secret store. |
 | *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
 | *Could not identify the remote OS* | The device is not one of the supported types, or `uname` is unavailable. Pass `--target` explicitly if it is supported. |
 | Odd symbols in the banner | The tool falls back to ASCII automatically outside Windows Terminal or VS Code. Windows Terminal is recommended. |
@@ -264,6 +284,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 ## Contributing
 
 - Keep line endings consistent. The repository includes a `.gitattributes` that stores `*.ps1` with LF (`* text=auto`, `*.ps1 text eol=lf`). Scripts embedded in the file and sent to servers are stripped of carriage returns, so a CRLF checkout on Windows works too.
+- Static analysis: the password-related PSScriptAnalyzer rules are satisfied (secrets are `SecureString` only, and nothing uses `ConvertTo-SecureString -AsPlainText`). The coloured UI deliberately uses `Write-Host`, so expect `PSAvoidUsingWriteHost` notes.
 - Keep the file pure ASCII (glyphs are built from character codes) so Windows PowerShell 5.1 never misreads its encoding.
 - Please test changes against a real SSH server; the Linux paths were verified against OpenSSH with password auth, sudo, root and bulk lists.
 
@@ -271,6 +292,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.4.0** | **Breaking:** `-Password` and `-Passphrase` are now `SecureString` parameters; plain text on the command line (`--password abc`, `--password=abc`) is refused. Removes the last `ConvertTo-SecureString -AsPlainText` use, so the password-related PSScriptAnalyzer rules are clean. |
 | **1.3.6** | MikroTik: the RouterOS version is now read correctly (`:put [...]`, with a fallback and terminal-control-code stripping), so the Ed25519 version check and the *Detected:* line work on real routers. Marked verified on real hardware. |
 | **1.3.5** | Fix: the Posh-SSH module was never loaded or offered for installation when it was missing, which ended in *The term 'New-SSHSession' is not recognized*. It is now checked at the start of every deploy, installed on request, and a failed installation shows the manual command. |
 | **1.3.4** | MikroTik: waits for the uploaded file to be complete, verifies that the key was really added (no more false *Key installed*), reports leftover temp files, adds `-Verbose` diagnostics; an unconfirmed import with a failing key login is now a failed host. |

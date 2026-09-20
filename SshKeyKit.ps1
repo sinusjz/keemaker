@@ -24,9 +24,9 @@
                                           (ignored for ed25519 - fixed length)
         --label <text>                    key comment          (default: user@computer)
         --name <file name>                file name in ~\.ssh  (default: id_<type>)
-        --passphrase <text>               optional key passphrase (prefer the interactive prompt)
+        -Passphrase <SecureString>        optional key passphrase (prompted in the menu)
         --host <ip|name>  --port <n>      deploy target        (port default: 22)
-        --user <name>     --password <pw> deploy credentials    (password is prompted if omitted)
+        --user <name>  -Password <SecureString>   deploy credentials (password is prompted, hidden, if omitted)
         --key <name|path>                 public key to deploy (default: id_ed25519)
         --target <auto|linux|esxi|mikrotik>  what kind of server you deploy to (default: auto = detect the
                                           remote OS after login; an explicit value skips detection)
@@ -68,8 +68,8 @@ param(
     [Alias('User')]
     [string]$Username,
 
-    [object]$Password,
-    [object]$Passphrase,
+    [securestring]$Password,
+    [securestring]$Passphrase,
     [string]$Key,
     [int]$Port,
     [string]$Target,
@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.6'
+$script:Version = '1.4.0'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -287,12 +287,6 @@ function ConvertTo-PlainText {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
     try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
-}
-
-function ConvertTo-Secure {
-    param($Value)
-    if ($Value -is [securestring]) { return $Value }
-    return (ConvertTo-SecureString -String "$Value" -AsPlainText -Force)
 }
 
 # Runs an executable with full control over quoting (avoids PowerShell's native-argument quirks,
@@ -549,10 +543,7 @@ function Invoke-Generate {
     # 5) Passphrase (optional) -----------------------------------------------
     $passphrase = ''
     if ($O.Passphrase) {
-        if ($O.Passphrase -isnot [securestring]) {
-            Write-Warn 'A plain-text passphrase on the command line ends up in your shell history - prefer the prompt.'
-        }
-        $passphrase = ConvertTo-PlainText (ConvertTo-Secure $O.Passphrase)
+        $passphrase = ConvertTo-PlainText $O.Passphrase
         if ($passphrase.Length -lt 5) { throw 'Passphrase must be at least 5 characters.' }
     }
     elseif ($Interactive) {
@@ -1285,10 +1276,8 @@ function Invoke-Deploy {
 
     # Password (asked once, reused for every host) ---------------------------------------
     if ($O.Password) {
-        $secure = ConvertTo-Secure $O.Password
-        if ($O.Password -isnot [securestring]) {
-            Write-Warn 'A plain-text password on the command line ends up in your shell history - prefer the prompt.'
-        }
+        $secure = $O.Password
+        if ($secure.Length -eq 0) { throw 'The password must not be empty.' }
     }
     else { $secure = Read-Secret -Label $(if ($bulk) { "Password (used for all $($entries.Count) hosts)" } else { 'Password' }) }
 
@@ -1413,9 +1402,9 @@ function Show-Usage {
     Write-Host '    --bits | --byte | --length <n> RSA 2048-16384 (4096) | ECDSA 256/384/521 (384)' -ForegroundColor Gray
     Write-Host '    --label <text>                 key comment (default user@computer)' -ForegroundColor Gray
     Write-Host '    --name <file>                  file name in ~\.ssh (default id_<type>)' -ForegroundColor Gray
-    Write-Host '    --passphrase <text>            optional (prefer the interactive prompt)' -ForegroundColor Gray
+    Write-Host '    -Passphrase <SecureString>     optional key passphrase (prompted in the menu)' -ForegroundColor Gray
     Write-Host '    --host <ip|name> --port <n>    deploy target (port default 22)' -ForegroundColor Gray
-    Write-Host '    --user <name> --password <pw>  deploy credentials (password prompted if omitted)' -ForegroundColor Gray
+    Write-Host '    --user <name> -Password <SecureString>  deploy credentials (prompted, hidden, if omitted)' -ForegroundColor Gray
     Write-Host '    --key <name|path>              public key to deploy (default id_ed25519)' -ForegroundColor Gray
     Write-Host '    --target <auto|linux|esxi|mikrotik>  server type (default auto = detect the remote OS)' -ForegroundColor Gray
     Write-Host '    --host-list <file>             many hosts: host | host:port | user@host[:port]' -ForegroundColor Gray
@@ -1433,7 +1422,7 @@ function Merge-CliArguments {
         type = 'Type'; bits = 'Bits'; byte = 'Bits'; bytes = 'Bits'; length = 'Bits'; size = 'Bits'
         label = 'Label'; comment = 'Label'; name = 'Name'
         host = 'Server'; hostname = 'Server'; server = 'Server'; ip = 'Server'
-        user = 'Username'; username = 'Username'; password = 'Password'; passphrase = 'Passphrase'
+        user = 'Username'; username = 'Username'
         key = 'Key'; port = 'Port'; target = 'Target'
         'host-list' = 'HostList'; hostlist = 'HostList'; hosts = 'HostList'
     }
@@ -1452,6 +1441,11 @@ function Merge-CliArguments {
         $optName = $Matches[1].ToLower()
         $inline  = if ($Matches.ContainsKey(2)) { $Matches[2] } else { $null }
 
+        if ($optName -in 'password', 'passphrase') {
+            $paramName = if ($optName -eq 'password') { 'Password' } else { 'Passphrase' }
+            throw ("Plain-text passwords are not accepted on the command line (they end up in shell history and process lists). " +
+                   "Enter it at the prompt, or pass a SecureString:  -$paramName (Read-Host -AsSecureString)")
+        }
         if ($switchOptions.ContainsKey($optName)) {
             $Options[$switchOptions[$optName]] = $true
             continue
