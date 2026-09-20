@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.3.3'
+$script:Version = '1.3.4'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -803,6 +803,15 @@ function Install-KeyEsxi {
     if ($out -match 'KPT_PRESENT') { return 'present' } else { return 'added' }
 }
 
+# Runs a RouterOS console command over the exec channel and returns its (trimmed) text. Use -Verbose to see these.
+function Invoke-RosValue {
+    param($Session, [string]$Command)
+    $r = Invoke-SSHCommand -SSHSession $Session -TimeOut 20 -Command $Command
+    $text = ((@($r.Output) + @($r.Error)) -join ' ').Trim()
+    Write-Verbose "RouterOS> $Command   =>   $text"
+    return $text
+}
+
 function Install-KeyMikrotik {
     param($Session, [hashtable]$Connect, [string]$PubPath, [string]$Username, [string]$PubLine = '')
     # RouterOS has no authorized_keys file: upload the .pub over SFTP, then import it for the user.
@@ -824,16 +833,51 @@ function Install-KeyMikrotik {
     }
 
     $remoteName = 'kpt-import.pub'
-    $tmp  = Join-Path ([IO.Path]::GetTempPath()) $remoteName
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) $remoteName
     Copy-Item -LiteralPath $PubPath -Destination $tmp -Force
+    $localSize = (Get-Item -LiteralPath $tmp).Length
+    $countCmd  = ':put [:len [/user ssh-keys find where user="{0}"]]' -f $Username
+    $sizeCmd   = ':put [/file get [find name="{0}"] size]' -f $remoteName
     $sftp = $null
     try {
+        $t = Invoke-RosValue -Session $Session -Command $countCmd
+        $keysBefore = if ($t -match '^\d+$') { [int]$t } else { $null }
+
         $sftp = New-SFTPSession @Connect
+        Write-Verbose "SFTP: uploading $localSize bytes as '/$remoteName'"
         Set-SFTPItem -SessionId $sftp.SessionId -Path $tmp -Destination '/' -Force
+
+        # RouterOS may still be writing the file when the upload call returns: wait until it is complete.
+        $state = 'unknown'; $remoteSize = $null
+        for ($i = 0; $i -lt 20; $i++) {
+            $t = Invoke-RosValue -Session $Session -Command $sizeCmd
+            if ($t -match '^\d+$') {
+                $remoteSize = [int]$t
+                if ($remoteSize -eq $localSize) { $state = 'ready'; break }
+                $state = 'incomplete'
+            }
+            elseif ($t -match 'no such item|not found|invalid|bad |error|fail') { $state = 'missing' }
+            else { $state = 'unknown'; break }        # unexpected format: cannot verify, carry on
+            Start-Sleep -Milliseconds 500
+        }
+        if ($state -eq 'incomplete') { throw "The uploaded key file is incomplete on the router ($remoteSize of $localSize bytes). Please try again." }
+        if ($state -eq 'missing') {
+            $list = Invoke-RosValue -Session $Session -Command '/file print where name~"kpt"'
+            throw "The uploaded key file '$remoteName' was not found on the router after the upload. Files matching 'kpt': $list"
+        }
+
         $res = Invoke-SSHCommand -SSHSession $Session -TimeOut 30 `
                    -Command "/user ssh-keys import public-key-file=$remoteName user=$Username"
-        $out = (($res.Output + $res.Error) -join ' ').Trim()
+        $out = ((@($res.Output) + @($res.Error)) -join ' ').Trim()
+        Write-Verbose "RouterOS> /user ssh-keys import public-key-file=$remoteName user=$Username   =>   $out"
+
+        $t = Invoke-RosValue -Session $Session -Command $countCmd
+        $keysAfter = if ($t -match '^\d+$') { [int]$t } else { $null }
+
         $null = Invoke-SSHCommand -SSHSession $Session -TimeOut 15 -Command "/file remove $remoteName"
+        $left = Invoke-RosValue -Session $Session -Command (':put [:len [/file find where name="{0}"]]' -f $remoteName)
+        if ($left -match '^[1-9]\d*$') { Write-Warn "The temporary file '$remoteName' is still on the router - remove it manually:  /file remove $remoteName" }
+
         # A successful import prints nothing. Anything else is either a known error or worth showing.
         if ($out -match 'already') { return 'present' }
         if ($out -match 'unable to load|wrong format|bad passphrase|fail|error|invalid|no such|not supported|bad command|syntax|not enough permissions|denied') {
@@ -847,6 +891,9 @@ function Install-KeyMikrotik {
             throw $msg
         }
         if ($out) { Write-Warn "RouterOS answered: $out  (not recognised as an error - the login test below will confirm)." }
+
+        # Trust but verify: the user's key count must have gone up.
+        if ($null -ne $keysBefore -and $null -ne $keysAfter -and $keysAfter -le $keysBefore) { return 'unconfirmed' }
         return 'added'
     }
     finally {
@@ -924,8 +971,9 @@ function Test-KeyLogin {
         return 'legacy'
     }
     $why = if ($r.StdErr) { ($r.StdErr -split "\r?\n")[-1] } else { "exit code $($r.ExitCode)" }
-    Write-Warn "Key installed, but the login test failed: $why"
-    Write-Info 'Check PubkeyAuthentication, SELinux contexts and home-directory permissions on the server.'
+    Write-Warn "Key-based login failed: $why"
+    if ($Target -eq 'mikrotik') { Write-Info 'On the router check that the user has the key:  /user ssh-keys print   (run this tool with -Verbose for details).' }
+    else                        { Write-Info 'Check PubkeyAuthentication, SELinux contexts and home-directory permissions on the server.' }
     return 'failed'
 }
 
@@ -1052,8 +1100,9 @@ function Install-KeyOnHost {
             default    { $status = Install-KeyLinux    -Session $session -PubLine $PubLine }
         }
         $where = switch ($Target) { 'esxi' { "/etc/ssh/keys-$Username/authorized_keys" } 'mikrotik' { "RouterOS user '$Username'" } default { '~/.ssh/authorized_keys' } }
-        if ($status -eq 'present') { Write-Ok 'Key was already authorized on the server - nothing changed.' }
-        else                       { Write-Ok "Key installed ($where) for ${Username}@${Server}." }
+        if     ($status -eq 'present')     { Write-Ok 'Key was already authorized on the server - nothing changed.' }
+        elseif ($status -eq 'unconfirmed') { Write-Warn "RouterOS did not report a new key for '$Username' (it may already be present, or the import silently failed). The login test below decides. Use -Verbose for details." }
+        else                               { Write-Ok "Key installed ($where) for ${Username}@${Server}." }
         if ($status -eq 'added' -and $Target -eq 'mikrotik') {
             Write-Info "RouterOS normally stops accepting this user's password over SSH once the user has a key (setting: /ip ssh always-allow-password-login). Keep your current session open until key login is confirmed."
         }
@@ -1237,9 +1286,12 @@ function Invoke-Deploy {
         try {
             $r = Install-KeyOnHost -Target $target -Server $e.Server -Port $e.Port -Username $e.User -Secure $secure `
                     -PubPath $PubPath -PubLine $pubLine -AcceptKey $acceptKey -DisablePw $disablePw -AskDisablePw $askDisable -Ask ($Interactive -and -not $bulk)
-            $detail = "[$($r.Target)] " + $(if ($r.Status -eq 'present') { 'key was already present' } else { 'key installed' })
+            $detail = "[$($r.Target)] " + $(switch ($r.Status) { 'present' { 'key was already present' } 'unconfirmed' { 'key import NOT confirmed' } default { 'key installed' } })
             $detail += switch ($r.Login) { 'ok' { ', login verified' } 'legacy' { ', login OK only with legacy algorithms' } 'failed' { ', login test FAILED' } default { '' } }
             $sshOptions = $r.SshOptions
+            if ($r.Status -eq 'unconfirmed' -and $r.Login -eq 'failed') {
+                throw 'The key was NOT installed: the device did not confirm the import and key login fails. Run with -Verbose and check the key list on the device (RouterOS: /user ssh-keys print).'
+            }
             $results += [pscustomobject]@{ Host = $label; Ok = $true; Detail = $detail }
         }
         catch {
@@ -1339,6 +1391,7 @@ function Show-Usage {
     Write-Host '    -AddToAgent                    load the new key into ssh-agent' -ForegroundColor Gray
     Write-Host '    -DisablePasswordAuth           Linux: disable SSH password login after a verified key login' -ForegroundColor Gray
     Write-Host '    -Force  -AcceptHostKey  -Help' -ForegroundColor Gray
+    Write-Host '    -Verbose                       show every RouterOS command and answer (for troubleshooting)' -ForegroundColor Gray
     Write-Host ''
 }
 

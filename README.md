@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.3.3         │
+  │ Generate · List · Deploy        v1.3.4         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -110,6 +110,7 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 | `-DisablePasswordAuth` | Linux only: turn off SSH password login after a verified key login. |
 | `-AcceptHostKey` | Trust an unknown server host key without asking. |
 | `-Force` | Overwrite an existing key and skip confirmation prompts (including installing Posh-SSH). |
+| `-Verbose` | Show every RouterOS command and answer while deploying (useful for troubleshooting). |
 | `-Help` | Show a short usage summary. |
 
 Exit codes: `0` success, `1` error or, in batch mode, at least one failed host.
@@ -151,6 +152,7 @@ An incompatible key is refused **before anything is uploaded**: immediately when
   .\SshKeyKit.ps1 -Deploy --key id_mikrotik --host 192.168.88.1 --user admin
   ```
 
+- **The import is verified, not assumed.** The tool waits until the uploaded file is complete on the router, imports it, and checks that the user's key count went up. If RouterOS answers with an error, the error is shown. If RouterOS answers with nothing but no new key appears, the tool says so (*did not report a new key*) instead of claiming success, and a failing key login then marks the host as failed. Run with `-Verbose` to see every command and answer. Observed: RouterOS 7.8 rejects Ed25519 user keys.
 - **Password login stops for that user.** By default RouterOS stops accepting a user's password over SSH once the user has a key (see `/ip ssh always-allow-password-login`). Keep your current session open until the login test confirms key login works.
 
 #### Detection
@@ -245,7 +247,8 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *The ssh-agent service is disabled* | Once, from an administrator PowerShell: `Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent` |
 | *Authentication failed for user@host* | Check username and password, and that password login is still enabled on the server (it is not after `-DisablePasswordAuth`). |
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
-| *Key installed, but the login test failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
+| *Key-based login failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
+| MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\SshKeyKit.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
 | *unable to load key file (wrong format or bad passphrase)!* (MikroTik) | RouterOS cannot read the key, usually because of its type. Deploy an RSA key instead (see [MikroTik notes](#mikrotik-notes)). |
 | *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
@@ -274,6 +277,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.3.4** | MikroTik: waits for the uploaded file to be complete, verifies that the key was really added (no more false *Key installed*), reports leftover temp files, adds `-Verbose` diagnostics; an unconfirmed import with a failing key login is now a failed host. |
 | **1.3.3** | MikroTik: an import that RouterOS refuses (e.g. *unable to load key file*) is now reported as an error instead of "Key installed"; Ed25519 is checked against the RouterOS version; note about password login stopping after a key is imported. |
 | **1.3.2** | Login test recognises algorithm-negotiation failures on legacy devices (e.g. default RouterOS), retries with the offered algorithms and explains the fix. |
 | **1.3.1** | Refuse Ed25519 keys for ESXi targets (unsupported by ESXi) with guidance to use ECDSA or RSA. |
