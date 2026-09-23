@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.4.0         │
+  │ Generate · List · Deploy        v1.4.1         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
@@ -205,6 +205,23 @@ backup@10.0.0.5:2200
 
 After installing the key the tool tries a key-only login and reports the result. The test is skipped, with a hint, for passphrase-protected keys that are not loaded in ssh-agent (`ssh-add <key>` or generate with `-AddToAgent`).
 
+### Rebuilt or reinstalled servers (stale known_hosts entry)
+
+If a server was rebuilt, reinstalled, or its IP address was reused, your `known_hosts` file still has the old fingerprint. The upload itself succeeds (Posh-SSH asks you to trust the new key separately, or `-AcceptHostKey` skips that), but the final login test then fails against the outdated local record with an error such as:
+
+```text
+Host key verification failed.
+```
+
+Since the new key was already trusted earlier in the same deploy, the tool removes the stale `known_hosts` entry automatically using the exact command OpenSSH itself provides (`ssh-keygen -R ...`), retries the login test once, and tells you what it did:
+
+```text
+! The locally cached SSH fingerprint for this server did not match (often means it was rebuilt or reinstalled). The outdated entry was replaced now that the new key has been confirmed.
++ Key-based login works.
+```
+
+If the fix itself fails (for example a read-only `known_hosts` file), the login test fails normally and the message above is not shown; run the `ssh-keygen -R ...` command OpenSSH gives you by hand.
+
 ### Older devices that only offer legacy algorithms
 
 Some devices, notably RouterOS with default settings, only offer old SSH algorithms that current OpenSSH clients refuse by default:
@@ -263,6 +280,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\SshKeyKit.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
 | *The term 'New-SSHSession' is not recognized* (v1.3.4 and older) / *Could not install Posh-SSH* | The Posh-SSH module is missing. v1.3.5 offers to install it; if that fails (no access to the PowerShell Gallery, old PowerShellGet), install it yourself with `Install-Module -Name Posh-SSH -Scope CurrentUser -Force`. On an offline machine copy the `Posh-SSH` folder from the [Posh-SSH repository](https://github.com/darkoperator/Posh-SSH) into `$HOME\Documents\WindowsPowerShell\Modules\` (Windows PowerShell) or `$HOME\Documents\PowerShell\Modules\` (PowerShell 7). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
+| *Host key verification failed* / *REMOTE HOST IDENTIFICATION HAS CHANGED* | Usually a rebuilt or reinstalled server. Handled automatically - see [Rebuilt or reinstalled servers](#rebuilt-or-reinstalled-servers-stale-known_hosts-entry). |
 | *unable to load key file (wrong format or bad passphrase)!* (MikroTik) | RouterOS cannot read the key, usually because of its type. Deploy an RSA key instead (see [MikroTik notes](#mikrotik-notes)). |
 | *Cannot process argument transformation on parameter 'Password'* (or `'Passphrase'`) | You passed plain text. Use a SecureString: `-Password (Read-Host -AsSecureString)`, a credential object or a secret store. |
 | *ESXi does not support Ed25519 keys* | Generate an ECDSA or RSA key (`-Generate --type ecdsa`) and deploy that one. |
@@ -292,6 +310,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.4.1** | Fix: a stale `known_hosts` entry (server rebuilt/reinstalled) made the login test fail with *Host key verification failed* even though the new key was already trusted; the tool now removes the outdated entry automatically and retries. |
 | **1.4.0** | **Breaking:** `-Password` and `-Passphrase` are now `SecureString` parameters; plain text on the command line (`--password abc`, `--password=abc`) is refused. Removes the last `ConvertTo-SecureString -AsPlainText` use, so the password-related PSScriptAnalyzer rules are clean. |
 | **1.3.6** | MikroTik: the RouterOS version is now read correctly (`:put [...]`, with a fallback and terminal-control-code stripping), so the Ed25519 version check and the *Detected:* line work on real routers. Marked verified on real hardware. |
 | **1.3.5** | Fix: the Posh-SSH module was never loaded or offered for installation when it was missing, which ended in *The term 'New-SSHSession' is not recognized*. It is now checked at the start of every deploy, installed on request, and a failed installation shows the manual command. |

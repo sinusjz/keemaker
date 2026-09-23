@@ -92,7 +92,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.4.0'
+$script:Version = '1.4.1'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -939,6 +939,18 @@ function Get-NegotiationHint {
     return $null
 }
 
+# OpenSSH prints the exact removal command when a known host's key no longer matches, e.g. after a server
+# rebuild or a reassigned IP: ssh-keygen -f '/home/x/.ssh/known_hosts' -R '[host]:port'. Reusing OpenSSH's own
+# command is more reliable than building one ourselves (it is already correct for hashed known_hosts files,
+# IPv6, non-default ports and custom file locations).
+function Get-StaleHostKeyFix {
+    param([string]$StdErr)
+    if ($StdErr -match "ssh-keygen -f '(?<file>[^']+)' -R '(?<pattern>[^']+)'") {
+        return [pscustomobject]@{ File = $Matches['file']; Pattern = $Matches['pattern'] }
+    }
+    return $null
+}
+
 function Invoke-KeyProbe {
     param([string]$Ssh, [string]$Priv, [string]$Server, [int]$Port, [string]$Username, [string]$Target, [string[]]$ExtraArgs = @())
     $probe = if ($Target -eq 'mikrotik') { ':put KPT_OK' } else { 'echo KPT_OK' }
@@ -968,16 +980,32 @@ function Test-KeyLogin {
     $r = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target $Target
     if ($r.Ok) { Write-Ok 'Key-based login works.'; return 'ok' }
 
-    # Some devices only offer algorithms that modern OpenSSH refuses by default. This is not a key problem:
-    # retry the test with exactly the algorithms the device offers (for this test only) and report it.
-    $extra = @(); $shown = @(); $found = @()
-    for ($i = 0; $i -lt 4 -and -not $r.Ok; $i++) {
+    # Two recoverable mismatches, retried on the same test connection:
+    #  - a stale known_hosts entry (the server was rebuilt or its IP was reassigned since the last visit;
+    #    the new key was already trusted when this deploy started, so the old local record is simply outdated)
+    #  - some devices only offer legacy algorithms that modern OpenSSH refuses by default
+    $extra = @(); $shown = @(); $found = @(); $staleFixed = $false
+    for ($i = 0; $i -lt 5 -and -not $r.Ok; $i++) {
+        $stale = Get-StaleHostKeyFix -StdErr $r.StdErr
+        if ($stale -and -not $staleFixed) {
+            Write-Verbose "Stale known_hosts entry: $($stale.Pattern) in $($stale.File)"
+            $rk = Invoke-Native -File $keygen -Arguments @('-f', $stale.File, '-R', $stale.Pattern)
+            Write-Verbose "ssh-keygen -R => exit $($rk.ExitCode)  $($rk.StdOut) $($rk.StdErr)"
+            if ($rk.ExitCode -ne 0) { break }
+            $staleFixed = $true
+            $r = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target $Target -ExtraArgs $extra
+            continue
+        }
         $hint = Get-NegotiationHint -StdErr $r.StdErr
         if (-not $hint) { break }
         $extra += @('-o', "$($hint.Option)=+$($hint.Offer)")
         $shown += "-o `"$($hint.Option)=+$($hint.Offer)`""
         $found += "$($hint.What): $($hint.Offer)"
         $r = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target $Target -ExtraArgs $extra
+    }
+    if ($r.Ok -and $staleFixed) {
+        Write-Warn 'The locally cached SSH fingerprint for this server did not match (often means it was rebuilt or reinstalled). The outdated entry was replaced now that the new key has been confirmed.'
+        if ($extra.Count -eq 0) { Write-Ok 'Key-based login works.'; return 'ok' }
     }
     if ($r.Ok -and $extra.Count -gt 0) {
         $script:NegotiationOptions = ($shown -join ' ')
