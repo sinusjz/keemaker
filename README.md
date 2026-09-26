@@ -5,14 +5,14 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.5.0         │
+  │ Generate · List · Deploy        v1.5.1         │
   ╰────────────────────────────────────────────────╯
 
-   [1] Generate      Create a new SSH key pair
-   [2] List          Show public keys in your .ssh folder
-   [3] Deploy        Upload a public key to one server
-   [4] Batch deploy  Upload a public key to many servers from a list file
-   [5] From known_hosts  Pick servers you have already connected to
+   [1] Generate               Create a new SSH key pair
+   [2] List                   Show public keys in your .ssh folder
+   [3] Deploy                 Upload a public key to one server
+   [4] Batch deploy           Upload a public key to many servers from a list file
+   [5] Deploy to known_hosts  Pick servers you have already connected to
    [6] Exit
 ```
 
@@ -58,7 +58,7 @@ Run the script without arguments.
 | **List** | Shows every `*.pub` in `.ssh` with type, length, fingerprint, label and modification date. |
 | **Deploy** | Pick a key, a target type (default: auto-detect), then host, port, username and password. |
 | **Batch deploy** | Same as Deploy, but for a host-list file (see [Host-list file format](#host-list-file-format)). The password is asked once. |
-| **From known_hosts** | Lists every server found in `~\.ssh\known_hosts`, then asks which ones to deploy to (see [Deploying from known_hosts](#deploying-from-known_hosts)). |
+| **Deploy to known_hosts** | Lists every server found in `~\.ssh\known_hosts`, then asks which ones to deploy to (see [Deploying from known_hosts](#deploying-from-known_hosts)). |
 
 ## Command-line mode
 
@@ -211,7 +211,14 @@ backup@10.0.0.5:2200
 
 Lists every server found in `~\.ssh\known_hosts`, one per line, numbered, then asks which ones to deploy to - for example `2`, `1,3`, or `1,3,5-7`. There is deliberately **no "select all"**: `known_hosts` records every server you have ever connected to, not just the ones you administer (a colleague's laptop, a client's jump box, a server you diagnosed once, even `github.com` if you clone repositories over SSH), so each deployment is a conscious choice. The picker always appears, even from the command line (`-Deploy -FromKnownHosts --key ... --user ...`), since there is no way to name a selection without seeing the list first.
 
-Multiple lines for the same host (one per key type) are shown once. `known_hosts` never records a username, so you are always asked for one, and it is used for every host you pick. Lines the tool cannot turn into a concrete host are counted and skipped, never guessed at: hashed entries (`HashKnownHosts`, common on Debian/Ubuntu/Arch - the hostname cannot be recovered from the hash), `@cert-authority` / `@revoked` marker lines, and wildcard or negated patterns (`*.example.com`, `!host`). If every entry turns out to be hashed, the tool says so rather than showing an empty list.
+Multiple lines for the same host (one per key type) are shown once. `known_hosts` never records a username, so you are always asked for one, and it is used for every host you pick. The list is cleaned up before it is shown:
+
+- **Hashed entries** (`HashKnownHosts`, common on Debian/Ubuntu/Arch) are skipped - the hostname cannot be recovered from the hash. If every entry turns out to be hashed, the tool says so rather than showing an empty list.
+- **`@cert-authority` / `@revoked` marker lines**, and wildcard or negated patterns (`*.example.com`, `!host`), are not concrete hosts and are skipped.
+- **Corrupted or line-wrapped entries** - for example a very long line that an editor split across two physical lines, leaving raw key material where a hostname is expected - are detected and skipped rather than shown as a nonsense "server".
+- **A short hostname and its FQDN on the same port** (e.g. `nextcloud` and `nextcloud.se24.local`, both reachable because of a DNS search-domain suffix) are shown once, as the FQDN.
+
+Each of these is counted and reported below the list, so nothing is silently dropped without explanation.
 
 Everything past the picker - OS detection, the password prompt, the summary - is the same as Batch deploy.
 
@@ -324,6 +331,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.5.1** | Fixes for known_hosts deploy: reject corrupted/line-wrapped entries instead of showing raw key material as a "server"; collapse a short hostname with its matching FQDN; menu item renamed to "Deploy to known_hosts" with corrected alignment. |
 | **1.5.0** | New: deploy to servers picked from `~\.ssh\known_hosts` (menu item 5 or `-FromKnownHosts`). Lists every server found, with no "select all" yet - each one is chosen by hand. |
 | **1.4.1** | Fix: a stale `known_hosts` entry (server rebuilt/reinstalled) made the login test fail with *Host key verification failed* even though the new key was already trusted; the tool now removes the outdated entry automatically and retries. |
 | **1.4.0** | **Breaking:** `-Password` and `-Passphrase` are now `SecureString` parameters; plain text on the command line (`--password abc`, `--password=abc`) is refused. Removes the last `ConvertTo-SecureString -AsPlainText` use, so the password-related PSScriptAnalyzer rules are clean. |

@@ -95,7 +95,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.5.0'
+$script:Version = '1.5.1'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -157,9 +157,9 @@ function Write-Banner {
 }
 
 function Write-MenuItem {
-    param([string]$Number, [string]$Title, [string]$Description)
+    param([string]$Number, [string]$Title, [string]$Description, [int]$Width = 14)
     Write-Host "   [$Number] " -NoNewline -ForegroundColor Cyan
-    Write-Host $Title.PadRight(14) -NoNewline -ForegroundColor White
+    Write-Host $Title.PadRight($Width) -NoNewline -ForegroundColor White
     Write-Host $Description -ForegroundColor DarkGray
 }
 
@@ -773,12 +773,38 @@ function Get-KnownHostEntries {
             if ($t.StartsWith('!') -or $t.Contains('*') -or $t.Contains('?')) { $skipped++; continue }
             $h = $t; $p = 22
             if ($t -match '^\[(?<h>.+)\]:(?<p>\d+)$') { $h = $Matches['h']; $p = [int]$Matches['p'] }
+            # Guard against a corrupted or line-wrapped entry (e.g. an editor that wrapped a long line) spilling
+            # raw key material into the host-pattern position: real hostnames/IPs never contain '+', '/', '='
+            # (base64-only characters) and are never anywhere near this long.
+            if ($h.Length -gt 100 -or $h -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9_.:-]*[A-Za-z0-9])?$') { $skipped++; continue }
             $key = "$h|$p"
             if (-not $seen.Contains($key)) { $seen[$key] = [pscustomobject]@{ Server = $h; Port = $p } }
         }
     }
-    $entries = @($seen.Values | Sort-Object Server, Port)
-    return [pscustomobject]@{ Entries = $entries; Hashed = $hashed; Skipped = $skipped }
+
+    # Collapse a short hostname with its FQDN when a default search-domain would resolve them to the same
+    # place (e.g. "nextcloud" and "nextcloud.se24.local" on the same port) - the FQDN is kept as unambiguous.
+    $merged = 0
+    $byPort = @{}
+    foreach ($e in $seen.Values) {
+        if (-not $byPort.ContainsKey($e.Port)) { $byPort[$e.Port] = @() }
+        $byPort[$e.Port] += $e
+    }
+    $final = New-Object System.Collections.Generic.List[object]
+    foreach ($port in $byPort.Keys) {
+        $group = $byPort[$port]
+        $fqdns = @($group | Where-Object { $_.Server.Contains('.') })
+        foreach ($e in $group) {
+            if (-not $e.Server.Contains('.')) {
+                $prefix = $e.Server.ToLower() + '.'
+                if (@($fqdns | Where-Object { $_.Server.ToLower().StartsWith($prefix) }).Count -gt 0) { $merged++; continue }
+            }
+            $final.Add($e)
+        }
+    }
+
+    $entries = @($final | Sort-Object Server, Port)
+    return [pscustomobject]@{ Entries = $entries; Hashed = $hashed; Skipped = $skipped; Merged = $merged }
 }
 
 function Show-KnownHostEntries {
@@ -832,7 +858,8 @@ function Select-KnownHosts {
     Write-Host ''
     Write-Info ("{0} server(s) found." -f $found.Entries.Count)
     if ($found.Hashed  -gt 0) { Write-Info "$($found.Hashed) hashed entries were skipped (cannot be read; see the README)." }
-    if ($found.Skipped -gt 0) { Write-Info "$($found.Skipped) other entries (certificate authorities, revoked or wildcard patterns) were skipped." }
+    if ($found.Skipped -gt 0) { Write-Info "$($found.Skipped) other entries (certificate authorities, revoked, wildcard, or unreadable patterns) were skipped." }
+    if ($found.Merged  -gt 0) { Write-Info "$($found.Merged) short hostname(s) were merged into their matching FQDN (e.g. 'nextcloud' -> 'nextcloud.example.local')." }
     Write-Warn 'known_hosts lists every server you have ever connected to, not just servers you manage. Only pick the ones you actually administer.'
     Write-Host ''
 
@@ -1311,7 +1338,7 @@ function Invoke-Deploy {
     param([hashtable]$O, [bool]$Interactive, [string]$PubPath = '', [bool]$Batch = $false, [bool]$FromKnownHosts = $false)
 
     $fromKnown = $FromKnownHosts -or [bool]$O.FromKnownHosts
-    Write-Section $(if ($fromKnown) { 'Deploy to servers from known_hosts' } elseif ($Batch) { 'Batch deploy' } else { 'Deploy public key' })
+    Write-Section $(if ($fromKnown) { 'Deploy to known_hosts' } elseif ($Batch) { 'Batch deploy' } else { 'Deploy public key' })
 
     # Which key? --------------------------------------------------------------
     if (-not $PubPath) {
@@ -1487,12 +1514,16 @@ function Show-Menu {
     try { Clear-Host } catch { }
     Write-Banner
     Write-Host ''
-    Write-MenuItem '1' 'Generate'     'Create a new SSH key pair'
-    Write-MenuItem '2' 'List'         'Show public keys in your .ssh folder'
-    Write-MenuItem '3' 'Deploy'       'Upload a public key to one server'
-    Write-MenuItem '4' 'Batch deploy' 'Upload a public key to many servers from a list file'
-    Write-MenuItem '5' 'From known_hosts' 'Pick servers you have already connected to and deploy to them'
-    Write-MenuItem '6' 'Exit'         ''
+    $items = @(
+        @{ N = '1'; T = 'Generate';         D = 'Create a new SSH key pair' }
+        @{ N = '2'; T = 'List';             D = 'Show public keys in your .ssh folder' }
+        @{ N = '3'; T = 'Deploy';           D = 'Upload a public key to one server' }
+        @{ N = '4'; T = 'Batch deploy';     D = 'Upload a public key to many servers from a list file' }
+        @{ N = '5'; T = 'Deploy to known_hosts'; D = 'Pick servers you have already connected to' }
+        @{ N = '6'; T = 'Exit';             D = '' }
+    )
+    $titleWidth = (($items | ForEach-Object { $_.T.Length } | Measure-Object -Maximum).Maximum) + 2
+    foreach ($item in $items) { Write-MenuItem $item.N $item.T $item.D -Width $titleWidth }
     Write-Host ''
     Write-Host "  Key folder: $($script:SshDir)" -ForegroundColor DarkGray
     Write-Host ''
