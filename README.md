@@ -5,14 +5,15 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.4.1         │
+  │ Generate · List · Deploy        v1.5.0         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate      Create a new SSH key pair
    [2] List          Show public keys in your .ssh folder
    [3] Deploy        Upload a public key to one server
    [4] Batch deploy  Upload a public key to many servers from a list file
-   [5] Exit
+   [5] From known_hosts  Pick servers you have already connected to
+   [6] Exit
 ```
 
 ## Features
@@ -57,6 +58,7 @@ Run the script without arguments.
 | **List** | Shows every `*.pub` in `.ssh` with type, length, fingerprint, label and modification date. |
 | **Deploy** | Pick a key, a target type (default: auto-detect), then host, port, username and password. |
 | **Batch deploy** | Same as Deploy, but for a host-list file (see [Host-list file format](#host-list-file-format)). The password is asked once. |
+| **From known_hosts** | Lists every server found in `~\.ssh\known_hosts`, then asks which ones to deploy to (see [Deploying from known_hosts](#deploying-from-known_hosts)). |
 
 ## Command-line mode
 
@@ -79,6 +81,9 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 
 # Deploy to many servers
 .\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin
+
+# Deploy to servers already in known_hosts (always shows the picker, even here)
+.\SshKeyKit.ps1 -Deploy -FromKnownHosts --key id_ed25519 --user admin
 ```
 
 ### Options
@@ -94,6 +99,7 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 | `-AddToAgent` | Load the generated key into ssh-agent. |
 | `--host` (`--hostname`, `--server`, `--ip`) | Server to deploy to. |
 | `--host-list` | Text file with many servers (see below). |
+| `-FromKnownHosts` | Deploy to servers picked from `~\.ssh\known_hosts` (see below). |
 | `--port` | SSH port. Default: 22. |
 | `--user` (`--username`) | Login user (default user for a host list). |
 | `-Password` | Login password as a **SecureString**. Prompted (hidden) when omitted. |
@@ -200,6 +206,14 @@ backup@10.0.0.5:2200
 - Each host is detected and handled separately, so Linux, ESXi and MikroTik servers can be mixed.
 - A failing host never stops the others; a summary lists the result per host.
 - Hostnames and IPv4 addresses only in list files; use `--host` for a single IPv6 host.
+
+### Deploying from known_hosts
+
+Lists every server found in `~\.ssh\known_hosts`, one per line, numbered, then asks which ones to deploy to - for example `2`, `1,3`, or `1,3,5-7`. There is deliberately **no "select all"**: `known_hosts` records every server you have ever connected to, not just the ones you administer (a colleague's laptop, a client's jump box, a server you diagnosed once, even `github.com` if you clone repositories over SSH), so each deployment is a conscious choice. The picker always appears, even from the command line (`-Deploy -FromKnownHosts --key ... --user ...`), since there is no way to name a selection without seeing the list first.
+
+Multiple lines for the same host (one per key type) are shown once. `known_hosts` never records a username, so you are always asked for one, and it is used for every host you pick. Lines the tool cannot turn into a concrete host are counted and skipped, never guessed at: hashed entries (`HashKnownHosts`, common on Debian/Ubuntu/Arch - the hostname cannot be recovered from the hash), `@cert-authority` / `@revoked` marker lines, and wildcard or negated patterns (`*.example.com`, `!host`). If every entry turns out to be hashed, the tool says so rather than showing an empty list.
+
+Everything past the picker - OS detection, the password prompt, the summary - is the same as Batch deploy.
 
 ### Login test
 
@@ -310,6 +324,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.5.0** | New: deploy to servers picked from `~\.ssh\known_hosts` (menu item 5 or `-FromKnownHosts`). Lists every server found, with no "select all" yet - each one is chosen by hand. |
 | **1.4.1** | Fix: a stale `known_hosts` entry (server rebuilt/reinstalled) made the login test fail with *Host key verification failed* even though the new key was already trusted; the tool now removes the outdated entry automatically and retries. |
 | **1.4.0** | **Breaking:** `-Password` and `-Passphrase` are now `SecureString` parameters; plain text on the command line (`--password abc`, `--password=abc`) is refused. Removes the last `ConvertTo-SecureString -AsPlainText` use, so the password-related PSScriptAnalyzer rules are clean. |
 | **1.3.6** | MikroTik: the RouterOS version is now read correctly (`:put [...]`, with a fallback and terminal-control-code stripping), so the Ed25519 version check and the *Detected:* line work on real routers. Marked verified on real hardware. |

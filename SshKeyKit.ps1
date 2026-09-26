@@ -32,6 +32,8 @@
                                           remote OS after login; an explicit value skips detection)
         --host-list <file>                deploy to many hosts; one per line: host | host:port | user@host[:port]
                                           (lines starting with # are ignored; the password is asked once)
+        -FromKnownHosts                    pick servers from ~\.ssh\known_hosts and deploy to them (always
+                                          shows a picker to choose from; no "select all" yet)
         -AddToAgent                       after generating, load the key into ssh-agent
         -DisablePasswordAuth              Linux only: after a VERIFIED key login, turn off SSH password login
         -Force                            overwrite existing keys / skip confirmations
@@ -74,6 +76,7 @@ param(
     [int]$Port,
     [string]$Target,
     [string]$HostList,
+    [switch]$FromKnownHosts,
 
     [switch]$Force,
     [switch]$AcceptHostKey,
@@ -92,7 +95,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.4.1'
+$script:Version = '1.5.0'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -746,6 +749,104 @@ function Assert-KeyFitsTarget {
 }
 
 # host list: one entry per line -> host | host:port | user@host[:port]   (# = comment)
+# Parses ~/.ssh/known_hosts into a deduplicated list of {Server, Port}. known_hosts never stores usernames,
+# so the caller always asks for one separately. Lines that cannot be turned into a concrete host are counted
+# and skipped, never guessed at: hashed entries (HashKnownHosts, unreadable by design), @cert-authority /
+# @revoked marker lines, wildcard patterns (*, ?) and negated patterns (!host, used only to carve exceptions
+# out of a wildcard).
+function Get-KnownHostEntries {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+
+    $seen = [ordered]@{}
+    $hashed = 0; $skipped = 0
+    foreach ($raw in (Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)) {
+        $line = "$raw".Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        $pattern = ($line -split '\s+', 2)[0]
+        if (-not $pattern) { continue }
+        if ($pattern -in '@cert-authority', '@revoked') { $skipped++; continue }
+        foreach ($tok in ($pattern -split ',')) {
+            $t = $tok.Trim()
+            if (-not $t) { continue }
+            if ($t.StartsWith('|1|')) { $hashed++; continue }
+            if ($t.StartsWith('!') -or $t.Contains('*') -or $t.Contains('?')) { $skipped++; continue }
+            $h = $t; $p = 22
+            if ($t -match '^\[(?<h>.+)\]:(?<p>\d+)$') { $h = $Matches['h']; $p = [int]$Matches['p'] }
+            $key = "$h|$p"
+            if (-not $seen.Contains($key)) { $seen[$key] = [pscustomobject]@{ Server = $h; Port = $p } }
+        }
+    }
+    $entries = @($seen.Values | Sort-Object Server, Port)
+    return [pscustomobject]@{ Entries = $entries; Hashed = $hashed; Skipped = $skipped }
+}
+
+function Show-KnownHostEntries {
+    param([object[]]$Entries)
+    $w = ($Entries | ForEach-Object { $_.Server.Length } | Measure-Object -Maximum).Maximum + 2
+    for ($i = 0; $i -lt $Entries.Count; $i++) {
+        Write-Host ('  [{0}] ' -f ($i + 1)) -NoNewline -ForegroundColor Cyan
+        Write-Host $Entries[$i].Server.PadRight($w) -NoNewline -ForegroundColor White
+        $portNote = if ($Entries[$i].Port -ne 22) { "port $($Entries[$i].Port)" } else { '' }
+        Write-Host $portNote -ForegroundColor DarkGray
+    }
+}
+
+# Parses a selection string such as "1,3,5-7" against a list of that size. Returns an object with either
+# Ok=$true and Indices (ascending, deduplicated) or Ok=$false and Error - never guess which shape a plain
+# array return is, since PowerShell's automatic pipeline unrolling can flatten single-element wrapper arrays.
+function ConvertFrom-IndexSelection {
+    param([string]$Text, [int]$Max)
+    $indices = [System.Collections.Generic.SortedSet[int]]::new()
+    foreach ($part in ($Text -split ',')) {
+        $p = $part.Trim()
+        if (-not $p) { continue }
+        if ($p -match '^(\d+)-(\d+)$') {
+            $lo = [int]$Matches[1]; $hi = [int]$Matches[2]
+            if ($lo -lt 1 -or $hi -gt $Max -or $lo -gt $hi) { return [pscustomobject]@{ Ok = $false; Error = "'$p' is not a valid range (1-$Max)." } }
+            for ($n = $lo; $n -le $hi; $n++) { [void]$indices.Add($n) }
+        }
+        elseif ($p -match '^\d+$') {
+            $n = [int]$p
+            if ($n -lt 1 -or $n -gt $Max) { return [pscustomobject]@{ Ok = $false; Error = "'$p' is out of range (1-$Max)." } }
+            [void]$indices.Add($n)
+        }
+        else { return [pscustomobject]@{ Ok = $false; Error = "'$p' is not a number or a range (e.g. 1,3,5-7)." } }
+    }
+    if ($indices.Count -eq 0) { return [pscustomobject]@{ Ok = $false; Error = 'Select at least one server.' } }
+    return [pscustomobject]@{ Ok = $true; Indices = @($indices) }
+}
+
+# Interactive picker: list every host found in known_hosts and let the person choose which ones to deploy to.
+# There is deliberately no "select all" shortcut yet - every host is chosen by hand while this is new.
+function Select-KnownHosts {
+    Write-Section 'Servers from known_hosts'
+    $khPath = Join-Path $script:SshDir 'known_hosts'
+    $found = Get-KnownHostEntries -Path $khPath
+    if (-not $found) { throw "No known_hosts file found at $khPath." }
+    if ($found.Entries.Count -eq 0) {
+        $why = if ($found.Hashed -gt 0) { " ($($found.Hashed) entries are hashed and cannot be read - see the README)" } else { '' }
+        throw "No usable entries found in $khPath$why."
+    }
+    Show-KnownHostEntries -Entries $found.Entries
+    Write-Host ''
+    Write-Info ("{0} server(s) found." -f $found.Entries.Count)
+    if ($found.Hashed  -gt 0) { Write-Info "$($found.Hashed) hashed entries were skipped (cannot be read; see the README)." }
+    if ($found.Skipped -gt 0) { Write-Info "$($found.Skipped) other entries (certificate authorities, revoked or wildcard patterns) were skipped." }
+    Write-Warn 'known_hosts lists every server you have ever connected to, not just servers you manage. Only pick the ones you actually administer.'
+    Write-Host ''
+
+    $max = $found.Entries.Count
+    while ($true) {
+        Write-Host "  $($script:G.Arrow) " -NoNewline -ForegroundColor Cyan
+        Write-Host 'Select servers to deploy to (e.g. 1,3,5-7): ' -NoNewline -ForegroundColor White
+        $answer = "$(Read-Host)".Trim()
+        $result = ConvertFrom-IndexSelection -Text $answer -Max $max
+        if (-not $result.Ok) { Write-Err $result.Error; continue }
+        return @($result.Indices | ForEach-Object { $found.Entries[$_ - 1] })
+    }
+}
+
 function Read-HostList {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Host list '$Path' was not found." }
@@ -1207,9 +1308,10 @@ function Show-HostListHelp {
 }
 
 function Invoke-Deploy {
-    param([hashtable]$O, [bool]$Interactive, [string]$PubPath = '', [bool]$Batch = $false)
+    param([hashtable]$O, [bool]$Interactive, [string]$PubPath = '', [bool]$Batch = $false, [bool]$FromKnownHosts = $false)
 
-    Write-Section $(if ($Batch) { 'Batch deploy' } else { 'Deploy public key' })
+    $fromKnown = $FromKnownHosts -or [bool]$O.FromKnownHosts
+    Write-Section $(if ($fromKnown) { 'Deploy to servers from known_hosts' } elseif ($Batch) { 'Batch deploy' } else { 'Deploy public key' })
 
     # Which key? --------------------------------------------------------------
     if (-not $PubPath) {
@@ -1259,10 +1361,15 @@ function Invoke-Deploy {
     }
     if ($target -ne 'auto') { Assert-KeyFitsTarget -Target $target -PubLine $pubLine }   # fail fast; auto re-checks per host
 
-    # Hosts: single host, or a host-list file ---------------------------------------
+    # Hosts: a single host, a host-list file, or a picker over known_hosts ---------------
     $listFile = $O.HostList
     $server   = $O.Server
-    if ($Batch -and -not $listFile) {
+    $knownHostsEntries = $null
+    if ($fromKnown) {
+        # Always shows the picker - there is no non-interactive form of "pick some hosts from a list" yet.
+        $knownHostsEntries = Select-KnownHosts
+    }
+    elseif ($Batch -and -not $listFile) {
         Show-HostListHelp
         $listFile = (Read-Prompt -Label 'Path to the host-list file' -Validate {
             param($v) if (-not (Test-Path -LiteralPath $v.Trim('"') -PathType Leaf)) { "File not found: $v" }
@@ -1281,8 +1388,9 @@ function Invoke-Deploy {
                 -Validate { param($v) Test-PortNum $v })
 
     $defaultUser = ''
-    if ($Batch -and $Interactive -and -not $O.Username) {
-        $defaultUser = Read-Prompt -Label 'Default username (Enter to skip if every line has user@)' -AllowEmpty `
+    if (($Batch -or $fromKnown) -and -not $O.Username -and ($Interactive -or $fromKnown)) {
+        $hint = if ($fromKnown) { '' } else { ' (Enter to skip if every line has user@)' }
+        $defaultUser = Read-Prompt -Label "Default username$hint" -AllowEmpty:$(-not $fromKnown) `
                 -Validate { param($v) Test-UserName $v }
     }
     elseif ($O.Username -or $Interactive -or -not $listFile) {
@@ -1292,7 +1400,10 @@ function Invoke-Deploy {
     }
 
     $entries = @()
-    if ($listFile) {
+    if ($knownHostsEntries) {
+        foreach ($e in $knownHostsEntries) { $entries += [pscustomobject]@{ Server = $e.Server; Port = $e.Port; User = $defaultUser } }
+    }
+    elseif ($listFile) {
         foreach ($e in @(Read-HostList $listFile)) {
             $u = if ($e.User) { $e.User } else { $defaultUser }
             if (-not $u) { throw "No username for host '$($e.Server)': add user@ in the list or use --user." }
@@ -1380,7 +1491,8 @@ function Show-Menu {
     Write-MenuItem '2' 'List'         'Show public keys in your .ssh folder'
     Write-MenuItem '3' 'Deploy'       'Upload a public key to one server'
     Write-MenuItem '4' 'Batch deploy' 'Upload a public key to many servers from a list file'
-    Write-MenuItem '5' 'Exit'         ''
+    Write-MenuItem '5' 'From known_hosts' 'Pick servers you have already connected to and deploy to them'
+    Write-MenuItem '6' 'Exit'         ''
     Write-Host ''
     Write-Host "  Key folder: $($script:SshDir)" -ForegroundColor DarkGray
     Write-Host ''
@@ -1390,7 +1502,7 @@ function Start-Interactive {
     while ($true) {
         Show-Menu
         $choice = Read-Prompt -Label 'Select an option' -Validate {
-            param($v) if ($v -notmatch '^[1-5]$') { 'Please enter a number from 1 to 5.' }
+            param($v) if ($v -notmatch '^[1-6]$') { 'Please enter a number from 1 to 6.' }
         }
         switch ($choice) {
             '1' {
@@ -1408,7 +1520,8 @@ function Start-Interactive {
             '2' { Invoke-Safely { Show-KeyList -Keys @(Get-KeyInfo) }; Suspend-Menu }
             '3' { Invoke-Safely { Invoke-Deploy -O @{} -Interactive $true }; Suspend-Menu }
             '4' { Invoke-Safely { Invoke-Deploy -O @{} -Interactive $true -Batch $true }; Suspend-Menu }
-            '5' { Write-Host ''; Write-Info 'Goodbye.'; Write-Host ''; return }
+            '5' { Invoke-Safely { Invoke-Deploy -O @{} -Interactive $true -FromKnownHosts $true }; Suspend-Menu }
+            '6' { Write-Host ''; Write-Info 'Goodbye.'; Write-Host ''; return }
         }
     }
 }
@@ -1436,6 +1549,7 @@ function Show-Usage {
     Write-Host '    --key <name|path>              public key to deploy (default id_ed25519)' -ForegroundColor Gray
     Write-Host '    --target <auto|linux|esxi|mikrotik>  server type (default auto = detect the remote OS)' -ForegroundColor Gray
     Write-Host '    --host-list <file>             many hosts: host | host:port | user@host[:port]' -ForegroundColor Gray
+    Write-Host '    -FromKnownHosts                pick servers from known_hosts (shows a picker)' -ForegroundColor Gray
     Write-Host '    -AddToAgent                    load the new key into ssh-agent' -ForegroundColor Gray
     Write-Host '    -DisablePasswordAuth           Linux: disable SSH password login after a verified key login' -ForegroundColor Gray
     Write-Host '    -Force  -AcceptHostKey  -Help' -ForegroundColor Gray
@@ -1459,6 +1573,7 @@ function Merge-CliArguments {
         'accept-host-key' = 'AcceptHostKey'; accepthostkey = 'AcceptHostKey'; help = 'Help'
         'add-to-agent' = 'AddToAgent'; addtoagent = 'AddToAgent'
         'disable-password-auth' = 'DisablePasswordAuth'; disablepasswordauth = 'DisablePasswordAuth'
+        'from-known-hosts' = 'FromKnownHosts'; fromknownhosts = 'FromKnownHosts'
     }
 
     for ($i = 0; $i -lt $Tokens.Count; $i++) {
@@ -1517,6 +1632,7 @@ $opts = @{
     Force         = $Force.IsPresent
     AcceptHostKey = $AcceptHostKey.IsPresent
     AddToAgent    = $AddToAgent.IsPresent
+    FromKnownHosts = $FromKnownHosts.IsPresent
     DisablePasswordAuth = $DisablePasswordAuth.IsPresent
 }
 foreach ($n in 'Type', 'Bits', 'Label', 'Name', 'Server', 'Username', 'Password', 'Passphrase', 'Key', 'Port', 'Target', 'HostList') {
