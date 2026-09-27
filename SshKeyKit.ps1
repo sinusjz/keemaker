@@ -95,7 +95,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.5.1'
+$script:Version = '1.5.2'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -1346,14 +1346,20 @@ function Invoke-Deploy {
         elseif ($Interactive) {
             $keys = @(Get-KeyInfo)
             if ($keys.Count -eq 0) { throw "No public keys found in $($script:SshDir). Generate one first." }
-            Show-KeyList -Keys $keys
-            Write-Host ''
-            $max = $keys.Count
-            $n = [int](Read-Prompt -Label 'Key to deploy (number)' -Default '1' -Validate {
-                param($v)
-                if ($v -notmatch '^\d{1,3}$' -or [int]$v -lt 1 -or [int]$v -gt $max) { "Enter a number between 1 and $max." }
-            })
-            $PubPath = $keys[$n - 1].Path
+            if ($keys.Count -eq 1) {
+                Write-Info "Using the only key found: $($keys[0].Name)"
+                $PubPath = $keys[0].Path
+            }
+            else {
+                Show-KeyList -Keys $keys
+                Write-Host ''
+                $max = $keys.Count
+                $n = [int](Read-Prompt -Label 'Key to deploy (number)' -Default '1' -Validate {
+                    param($v)
+                    if ($v -notmatch '^\d{1,3}$' -or [int]$v -lt 1 -or [int]$v -gt $max) { "Enter a number between 1 and $max." }
+                })
+                $PubPath = $keys[$n - 1].Path
+            }
         }
         else {
             $default = Join-Path $script:SshDir 'id_ed25519.pub'

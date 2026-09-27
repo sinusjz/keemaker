@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.5.1         │
+  │ Generate · List · Deploy        v1.5.2         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate               Create a new SSH key pair
@@ -40,10 +40,10 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ## Quick start
 
 1. Download `SshKeyKit.ps1` somewhere (or clone this repository).
-2. Open Windows Terminal and run:
+2. Open Windows Terminal and run (one-off run without changing any setting):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\SshKeyKit.ps1      # one-off run without changing any setting
+powershell -ExecutionPolicy Bypass -File .\SshKeyKit.ps1
 ```
 
 Keys are read from and written to `%USERPROFILE%\.ssh`.
@@ -331,6 +331,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.5.2** | If only one key exists, it is used automatically (no picker) for Deploy, Batch deploy and Deploy to known_hosts; the picker still appears whenever there is more than one. |
 | **1.5.1** | Fixes for known_hosts deploy: reject corrupted/line-wrapped entries instead of showing raw key material as a "server"; collapse a short hostname with its matching FQDN; menu item renamed to "Deploy to known_hosts" with corrected alignment. |
 | **1.5.0** | New: deploy to servers picked from `~\.ssh\known_hosts` (menu item 5 or `-FromKnownHosts`). Lists every server found, with no "select all" yet - each one is chosen by hand. |
 | **1.4.1** | Fix: a stale `known_hosts` entry (server rebuilt/reinstalled) made the login test fail with *Host key verification failed* even though the new key was already trusted; the tool now removes the outdated entry automatically and retries. |
