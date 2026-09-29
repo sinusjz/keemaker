@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.5.2         │
+  │ Generate · List · Deploy        v1.5.3         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate               Create a new SSH key pair
@@ -243,6 +243,19 @@ Since the new key was already trusted earlier in the same deploy, the tool remov
 
 If the fix itself fails (for example a read-only `known_hosts` file), the login test fails normally and the message above is not shown; run the `ssh-keygen -R ...` command OpenSSH gives you by hand.
 
+### Posh-SSH's format files are blocked by your execution policy
+
+Posh-SSH ships a handful of `.ps1xml` files that only control how its objects are *displayed* in a console - they have nothing to do with whether its actual commands (`New-SSHSession` and the rest) work. Under a restrictive PowerShell execution policy these files can fail to load, most often because:
+
+- the module folder still carries Windows' "downloaded from the internet" mark (a browser download, or a copied/extracted archive on an offline machine) and your policy is `RemoteSigned`; or
+- a Group Policy has locked the execution policy for the whole machine or user.
+
+v1.5.3 and later unblock the module folder automatically and only treat this as a real failure when the module's commands are genuinely unusable afterward - in the first case above, deploying still works, with a one-line note that it happened. If it genuinely fails, the tool tells you whether `Get-ExecutionPolicy -List` shows a Group-Policy-locked value (`MachinePolicy` / `UserPolicy` - only an administrator can change these) or whether you can fix it yourself with:
+
+```powershell
+Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned   # run as administrator
+```
+
 ### Older devices that only offer legacy algorithms
 
 Some devices, notably RouterOS with default settings, only offer old SSH algorithms that current OpenSSH clients refuse by default:
@@ -300,6 +313,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Could not read the RouterOS version* | Harmless: the deployment continues. v1.3.5 and older could not read the version on real routers (a bare `get` prints nothing over SSH); fixed in 1.3.6. If it still appears, run with `-Verbose` and look at the answer for `:put [/system resource get version]`. |
 | MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\SshKeyKit.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
 | *The term 'New-SSHSession' is not recognized* (v1.3.4 and older) / *Could not install Posh-SSH* | The Posh-SSH module is missing. v1.3.5 offers to install it; if that fails (no access to the PowerShell Gallery, old PowerShellGet), install it yourself with `Install-Module -Name Posh-SSH -Scope CurrentUser -Force`. On an offline machine copy the `Posh-SSH` folder from the [Posh-SSH repository](https://github.com/darkoperator/Posh-SSH) into `$HOME\Documents\WindowsPowerShell\Modules\` (Windows PowerShell) or `$HOME\Documents\PowerShell\Modules\` (PowerShell 7). |
+| *Errors occurred while loading the format data file... cannot be loaded because running scripts is disabled on this system* | Posh-SSH's own display-format files were blocked by your execution policy (v1.5.3 and later: harmless, the deploy still runs - see below; v1.5.2 and older: this stopped the deploy). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
 | *Host key verification failed* / *REMOTE HOST IDENTIFICATION HAS CHANGED* | Usually a rebuilt or reinstalled server. Handled automatically - see [Rebuilt or reinstalled servers](#rebuilt-or-reinstalled-servers-stale-known_hosts-entry). |
 | *unable to load key file (wrong format or bad passphrase)!* (MikroTik) | RouterOS cannot read the key, usually because of its type. Deploy an RSA key instead (see [MikroTik notes](#mikrotik-notes)). |
@@ -331,6 +345,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.5.3** | Fix: a blocked or execution-policy-restricted Posh-SSH format file (`Errors occurred while loading the format data file...`) stopped every deploy, even though the module's actual commands still worked. The module folder is now unblocked automatically, and only a genuine command failure is treated as an error - with guidance that distinguishes a Group-Policy lock from one you can fix yourself. |
 | **1.5.2** | If only one key exists, it is used automatically (no picker) for Deploy, Batch deploy and Deploy to known_hosts; the picker still appears whenever there is more than one. |
 | **1.5.1** | Fixes for known_hosts deploy: reject corrupted/line-wrapped entries instead of showing raw key material as a "server"; collapse a short hostname with its matching FQDN; menu item renamed to "Deploy to known_hosts" with corrected alignment. |
 | **1.5.0** | New: deploy to servers picked from `~\.ssh\known_hosts` (menu item 5 or `-FromKnownHosts`). Lists every server found, with no "select all" yet - each one is chosen by hand. |

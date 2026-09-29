@@ -95,7 +95,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.5.2'
+$script:Version = '1.5.3'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -616,12 +616,47 @@ function Invoke-Generate {
 # ============================================================================
 #  Action: Deploy
 # ============================================================================
+# Loads Posh-SSH and returns the true/false success - importing its display-format (.ps1xml) files can fail
+# under a restrictive execution policy (very commonly when a downloaded/copied module folder is still marked
+# "blocked", or a Group Policy locks the policy) while the module's actual cmdlets (New-SSHSession etc.) still
+# work fine; format files only control how PowerShell PRINTS objects. So the real test of success is whether
+# the cmdlet is there afterward, not whether Import-Module raised anything.
+function Import-PoshSsh {
+    $mod = Get-Module -ListAvailable -Name Posh-SSH | Select-Object -First 1
+    if (-not $mod) { return [pscustomobject]@{ Ok = $false; Errors = @() } }
+
+    # Files that arrived via a browser download or a copied/extracted archive are marked "downloaded from the
+    # internet" by Windows; under a RemoteSigned policy that alone can block loading them. Harmless to run
+    # even when it was not the cause.
+    try { Get-ChildItem -LiteralPath $mod.ModuleBase -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch { }
+
+    $moduleErrors = $null
+    Import-Module Posh-SSH -Global -ErrorAction SilentlyContinue -ErrorVariable moduleErrors 2>$null
+    $ok = [bool](Get-Command New-SSHSession -ErrorAction SilentlyContinue)
+    return [pscustomobject]@{ Ok = $ok; Errors = @($moduleErrors) }
+}
+
 function Initialize-PoshSsh {
     # Already loaded, or loadable on demand from the module path?
     if (Get-Command New-SSHSession -ErrorAction SilentlyContinue) { return }
+
     if (Get-Module -ListAvailable -Name Posh-SSH) {
-        Import-Module Posh-SSH -Global -ErrorAction Stop
-        return
+        $r = Import-PoshSsh
+        if ($r.Ok) {
+            if ($r.Errors -and (($r.Errors -join ' ') -match 'running scripts is disabled|execution polic')) {
+                Write-Warn 'Some Posh-SSH display-format files could not load because of your PowerShell execution policy. This only changes how command output looks in a console, not the deploy itself - continuing.'
+            }
+            return
+        }
+        $why = if ($r.Errors) { ($r.Errors | Select-Object -First 1).ToString() } else { 'its commands are not available for an unknown reason' }
+        if ("$why" -match 'running scripts is disabled|execution polic') {
+            $nl = [Environment]::NewLine + '    '
+            throw ("Posh-SSH is installed but Windows will not run its module files: $why" +
+                   $nl + 'Run  Get-ExecutionPolicy -List  - if MachinePolicy or UserPolicy shows a value, it is set by' +
+                   $nl + 'Group Policy and only an administrator can change it. Otherwise, run once as an administrator:' +
+                   $nl + 'Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned')
+        }
+        throw "Posh-SSH is installed but could not be loaded: $why"
     }
 
     Write-Warn "The 'Posh-SSH' module (needed for password-based upload) is not installed."
@@ -637,9 +672,13 @@ function Initialize-PoshSsh {
             $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
         }
         Install-Module -Name Posh-SSH -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-        Import-Module Posh-SSH -Global -ErrorAction Stop
-        if (-not (Get-Command New-SSHSession -ErrorAction SilentlyContinue)) {
-            throw 'the module installed but its commands are not available - close this PowerShell window, open a new one and run the tool again'
+        $r = Import-PoshSsh
+        if (-not $r.Ok) {
+            $why = if ($r.Errors) { ($r.Errors | Select-Object -First 1).ToString() } else { 'its commands are not available - close this PowerShell window, open a new one and run the tool again' }
+            throw $why
+        }
+        if ($r.Errors -and (($r.Errors -join ' ') -match 'running scripts is disabled|execution polic')) {
+            Write-Warn 'Some Posh-SSH display-format files could not load because of your PowerShell execution policy. This only changes how command output looks in a console, not the deploy itself - continuing.'
         }
         Write-Ok 'Posh-SSH installed.'
     }
