@@ -5,7 +5,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ```
   ╭────────────────────────────────────────────────╮
   │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.5.3         │
+  │ Generate · List · Deploy        v1.5.4         │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate               Create a new SSH key pair
@@ -39,11 +39,18 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 
 ## Quick start
 
-1. Download `SshKeyKit.ps1` somewhere (or clone this repository).
-2. Open Windows Terminal and run (one-off run without changing any setting):
+1. Copy `SshKeyKit.ps1` somewhere (or clone this repository).
+2. Open PowerShell (Windows Terminal gives the best look) and run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\SshKeyKit.ps1
+.\SshKeyKit.ps1
+```
+
+If Windows blocks the script ("running scripts is disabled"):
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # this window only
+Unblock-File .\SshKeyKit.ps1                                 # if the file was downloaded
 ```
 
 Keys are read from and written to `%USERPROFILE%\.ssh`.
@@ -250,7 +257,7 @@ Posh-SSH ships a handful of `.ps1xml` files that only control how its objects ar
 - the module folder still carries Windows' "downloaded from the internet" mark (a browser download, or a copied/extracted archive on an offline machine) and your policy is `RemoteSigned`; or
 - a Group Policy has locked the execution policy for the whole machine or user.
 
-v1.5.3 and later unblock the module folder automatically and only treat this as a real failure when the module's commands are genuinely unusable afterward - in the first case above, deploying still works, with a one-line note that it happened. If it genuinely fails, the tool tells you whether `Get-ExecutionPolicy -List` shows a Group-Policy-locked value (`MachinePolicy` / `UserPolicy` - only an administrator can change these) or whether you can fix it yourself with:
+v1.5.4 sets `Bypass` for its own process before deploying - undone the moment the window closes, and it changes nothing persistent - which fixes this outright on the common case of a machine where execution policy was never configured at all (every scope shows `Undefined`, which behaves as `Restricted` by default). This is also why the tool works well when launched with `irm ... | iex`: that pattern bypasses the check for the script's own content, but Posh-SSH's real files on disk were still subject to whatever policy was actually active - now set to `Bypass` for this process either way. v1.5.3 also unblocks the module folder automatically (every installed version, from v1.5.4 on) and only treats this as a real failure when the module's commands are genuinely unusable afterward - in the cosmetic case, deploying still works, with a one-line note that it happened. A genuine failure (only possible when a Group Policy locks `MachinePolicy` or `UserPolicy`, which the process-scope change cannot override) gets a clear explanation instead, and the tool tells you whether you can fix it yourself with:
 
 ```powershell
 Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned   # run as administrator
@@ -345,6 +352,7 @@ Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not s
 
 | Version | Changes |
 |---|---|
+| **1.5.4** | Sets the PowerShell execution policy to `Bypass` for its own process before deploying (undone when the window closes), fixing the common case where execution policy was never configured on the machine at all. Unblocks every installed version of Posh-SSH, not just one. |
 | **1.5.3** | Fix: a blocked or execution-policy-restricted Posh-SSH format file (`Errors occurred while loading the format data file...`) stopped every deploy, even though the module's actual commands still worked. The module folder is now unblocked automatically, and only a genuine command failure is treated as an error - with guidance that distinguishes a Group-Policy lock from one you can fix yourself. |
 | **1.5.2** | If only one key exists, it is used automatically (no picker) for Deploy, Batch deploy and Deploy to known_hosts; the picker still appears whenever there is more than one. |
 | **1.5.1** | Fixes for known_hosts deploy: reject corrupted/line-wrapped entries instead of showing raw key material as a "server"; collapse a short hostname with its matching FQDN; menu item renamed to "Deploy to known_hosts" with corrected alignment. |

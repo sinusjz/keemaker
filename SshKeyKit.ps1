@@ -95,7 +95,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.5.3'
+$script:Version = '1.5.4'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -622,13 +622,17 @@ function Invoke-Generate {
 # work fine; format files only control how PowerShell PRINTS objects. So the real test of success is whether
 # the cmdlet is there afterward, not whether Import-Module raised anything.
 function Import-PoshSsh {
-    $mod = Get-Module -ListAvailable -Name Posh-SSH | Select-Object -First 1
-    if (-not $mod) { return [pscustomobject]@{ Ok = $false; Errors = @() } }
+    $mods = @(Get-Module -ListAvailable -Name Posh-SSH)
+    if ($mods.Count -eq 0) { return [pscustomobject]@{ Ok = $false; Errors = @() } }
 
     # Files that arrived via a browser download or a copied/extracted archive are marked "downloaded from the
     # internet" by Windows; under a RemoteSigned policy that alone can block loading them. Harmless to run
-    # even when it was not the cause.
-    try { Get-ChildItem -LiteralPath $mod.ModuleBase -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch { }
+    # even when it was not the cause. Unblock every installed copy - if more than one version is present
+    # (e.g. a retried install left an older one behind), Import-Module may not resolve the same one
+    # Get-Module lists first, so unblocking only one copy could silently miss the one actually loaded.
+    foreach ($mod in $mods) {
+        try { Get-ChildItem -LiteralPath $mod.ModuleBase -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch { }
+    }
 
     $moduleErrors = $null
     Import-Module Posh-SSH -Global -ErrorAction SilentlyContinue -ErrorVariable moduleErrors 2>$null
@@ -639,6 +643,15 @@ function Import-PoshSsh {
 function Initialize-PoshSsh {
     # Already loaded, or loadable on demand from the module path?
     if (Get-Command New-SSHSession -ErrorAction SilentlyContinue) { return }
+
+    # A machine with no execution policy ever configured (every scope Undefined - the common case for an
+    # untouched Windows install) effectively runs as Restricted, which blocks loading Posh-SSH's real files
+    # from disk even when the person got this far via "irm ... | iex" (iex evaluates a string, which
+    # Restricted never gated in the first place - only Import-Module's on-disk file loading is affected).
+    # Bypass for this process only is safe: it is undone the moment this window closes and changes nothing
+    # persistent. A Group Policy lock (MachinePolicy/UserPolicy) cannot be overridden this way and simply
+    # leaves the policy as it was, so this never weakens a deliberately locked-down machine.
+    try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop } catch { }
 
     if (Get-Module -ListAvailable -Name Posh-SSH) {
         $r = Import-PoshSsh
