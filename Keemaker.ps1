@@ -5,17 +5,17 @@
 
 .DESCRIPTION
     Run without arguments to get the interactive menu:
-        .\SshKeyKit.ps1
+        .\Keemaker.ps1
 
     Or use inline mode. Both PowerShell-style (-Type) and GNU-style (--type) options work:
-        .\SshKeyKit.ps1 -Generate --type ed25519
-        .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_prod --label "sina@work"
-        .\SshKeyKit.ps1 -List
-        .\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user root --key id_ed25519
-        .\SshKeyKit.ps1 -Generate -Deploy --host srv01 --user admin      # generate, then deploy that key
-        .\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin  # many servers, password asked once
-        .\SshKeyKit.ps1 -Deploy --host esx01 --user root                   # OS is detected automatically
-        .\SshKeyKit.ps1 -Deploy --target esxi --host esx01 --user root    # ...or forced
+        .\Keemaker.ps1 -Generate --type ed25519
+        .\Keemaker.ps1 -Generate --type rsa --bits 4096 --name id_prod --label "sina@work"
+        .\Keemaker.ps1 -List
+        .\Keemaker.ps1 -Deploy --host 10.0.0.5 --user root --key id_ed25519
+        .\Keemaker.ps1 -Generate -Deploy --host srv01 --user admin      # generate, then deploy that key
+        .\Keemaker.ps1 -Deploy --host-list .\servers.txt --user admin  # many servers, password asked once
+        .\Keemaker.ps1 -Deploy --host esx01 --user root                   # OS is detected automatically
+        .\Keemaker.ps1 -Deploy --target esxi --host esx01 --user root    # ...or forced
 
     Options
         -Generate / -List / -Deploy       what to do (omit all for the menu)
@@ -95,7 +95,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ============================================================================
 #  Globals & UI glyphs
 # ============================================================================
-$script:Version = '1.5.4'
+$script:Version = '1.6.0'
 $script:HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 $script:SshDir  = Join-Path $script:HomeDir '.ssh'
 
@@ -151,8 +151,8 @@ function Write-Banner {
     $w = 48
     Write-Host ''
     Write-Host ('  ' + $g.TL + ($g.H * $w) + $g.TR) -ForegroundColor Cyan
-    Write-BoxRow 'SSH KEY KIT' 'White' $w
-    Write-BoxRow ("Generate $($g.Dot) List $($g.Dot) Deploy        v$($script:Version)") 'DarkGray' $w
+    Write-BoxRow 'KEEMAKER' 'White' $w
+    Write-BoxRow ("One key. Every door.        v$($script:Version)") 'DarkGray' $w
     Write-Host ('  ' + $g.BL + ($g.H * $w) + $g.BR) -ForegroundColor Cyan
 }
 
@@ -794,7 +794,7 @@ function Assert-KeyFitsTarget {
         # (Broadcom KB 394011). Ed25519 can never authenticate there, so refuse before touching the server.
         if ($PubLine -match '^(ssh-ed25519|sk-ssh-ed25519@openssh\.com)\s') {
             throw ("ESXi does not support Ed25519 keys (all versions; its SSH server only accepts ECDSA and RSA - Broadcom KB 394011). " +
-                   "Generate an ECDSA or RSA key instead, e.g.:  .\SshKeyKit.ps1 -Generate --type ecdsa --name id_esxi")
+                   "Generate an ECDSA or RSA key instead, e.g.:  .\Keemaker.ps1 -Generate --type ecdsa --name id_esxi")
         }
         if ($PubLine -match '^sk-ecdsa-') { Write-Warn 'Security-key (sk-) keys are not in ESXi''s documented list of supported algorithms and will probably be rejected.' }
     }
@@ -955,16 +955,16 @@ function Install-KeyLinux {
     # The key travels base64-encoded, so no quoting/escaping problems are possible.
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($PubLine))
     $script = @'
-umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if [ -s ~/.ssh/authorized_keys ] && [ -n "$(tail -c1 ~/.ssh/authorized_keys)" ]; then echo >> ~/.ssh/authorized_keys; fi; KEY=$(echo __B64__ | base64 -d); if grep -qxF -- "$KEY" ~/.ssh/authorized_keys; then echo KPT_PRESENT; else echo "$KEY" >> ~/.ssh/authorized_keys && echo KPT_ADDED; fi; command -v restorecon >/dev/null 2>&1 && restorecon -R ~/.ssh >/dev/null 2>&1; true
+umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; if [ -s ~/.ssh/authorized_keys ] && [ -n "$(tail -c1 ~/.ssh/authorized_keys)" ]; then echo >> ~/.ssh/authorized_keys; fi; KEY=$(echo __B64__ | base64 -d); if grep -qxF -- "$KEY" ~/.ssh/authorized_keys; then echo KMKR_PRESENT; else echo "$KEY" >> ~/.ssh/authorized_keys && echo KMKR_ADDED; fi; command -v restorecon >/dev/null 2>&1 && restorecon -R ~/.ssh >/dev/null 2>&1; true
 '@
     $cmd = "sh -c '" + $script.Replace('__B64__', $b64).Trim() + "'"
     $cmd = $cmd -replace "`r", ''      # a CRLF checkout must never leak carriage returns into the remote shell
     $res = Invoke-SSHCommand -SSHSession $Session -Command $cmd -TimeOut 30
     $out = ($res.Output -join "`n")
-    if ($out -notmatch 'KPT_(ADDED|PRESENT)') {
+    if ($out -notmatch 'KMKR_(ADDED|PRESENT)') {
         throw "Remote command failed (exit $($res.ExitStatus)). $((@($res.Error) -join ' ').Trim())"
     }
-    if ($out -match 'KPT_PRESENT') { return 'present' } else { return 'added' }
+    if ($out -match 'KMKR_PRESENT') { return 'present' } else { return 'added' }
 }
 
 function Install-KeyEsxi {
@@ -974,14 +974,14 @@ function Install-KeyEsxi {
     $safe = $PubLine -replace '[^A-Za-z0-9+/=@._ -]', '_'
     $cmd = ('D=/etc/ssh/keys-{0}; F=$D/authorized_keys; mkdir -p $D; touch $F; ' +
             'if [ -s $F ] && [ -n "$(tail -c 1 $F)" ]; then echo >> $F; fi; ' +
-            'if grep -qxF -- "{1}" $F; then echo KPT_PRESENT; else echo "{1}" >> $F && echo KPT_ADDED; fi; ' +
+            'if grep -qxF -- "{1}" $F; then echo KMKR_PRESENT; else echo "{1}" >> $F && echo KMKR_ADDED; fi; ' +
             'chmod 600 $F; /sbin/auto-backup.sh >/dev/null 2>&1; true') -f $Username, $safe
     $res = Invoke-SSHCommand -SSHSession $Session -Command $cmd -TimeOut 60
     $out = ($res.Output -join "`n")
-    if ($out -notmatch 'KPT_(ADDED|PRESENT)') {
+    if ($out -notmatch 'KMKR_(ADDED|PRESENT)') {
         throw "Remote command failed on ESXi (exit $($res.ExitStatus)). $((@($res.Error) -join ' ').Trim())"
     }
-    if ($out -match 'KPT_PRESENT') { return 'present' } else { return 'added' }
+    if ($out -match 'KMKR_PRESENT') { return 'present' } else { return 'added' }
 }
 
 # Runs a RouterOS console command over the exec channel and returns its (trimmed) text. Use -Verbose to see these.
@@ -1021,7 +1021,7 @@ function Install-KeyMikrotik {
         $rv = Get-RosVersion -Session $Session
         if ($rv) {
             if ($rv.Major -lt 7) {
-                throw "RouterOS $($rv.Text) does not support Ed25519 keys. Use an RSA key instead:  .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik"
+                throw "RouterOS $($rv.Text) does not support Ed25519 keys. Use an RSA key instead:  .\Keemaker.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik"
             }
             if ($rv.Major -eq 7 -and $rv.Minor -lt 12) {
                 Write-Warn "RouterOS $($rv.Text) may reject Ed25519 keys (support is reported from 7.12; older releases answer 'unable to load key file'). If the import fails, use an RSA key."
@@ -1030,7 +1030,7 @@ function Install-KeyMikrotik {
         else { Write-Warn "Could not read the RouterOS version (run with -Verbose to see the router's answer). Ed25519 keys need RouterOS 7.12 or newer (reported); older versions reject them." }
     }
 
-    $remoteName = 'kpt-import.pub'
+    $remoteName = 'keemaker-import.pub'
     $tmp = Join-Path ([IO.Path]::GetTempPath()) $remoteName
     Copy-Item -LiteralPath $PubPath -Destination $tmp -Force
     $localSize = (Get-Item -LiteralPath $tmp).Length
@@ -1060,8 +1060,8 @@ function Install-KeyMikrotik {
         }
         if ($state -eq 'incomplete') { throw "The uploaded key file is incomplete on the router ($remoteSize of $localSize bytes). Please try again." }
         if ($state -eq 'missing') {
-            $list = Invoke-RosValue -Session $Session -Command '/file print where name~"kpt"'
-            throw "The uploaded key file '$remoteName' was not found on the router after the upload. Files matching 'kpt': $list"
+            $list = Invoke-RosValue -Session $Session -Command '/file print where name~"keemaker"'
+            throw "The uploaded key file '$remoteName' was not found on the router after the upload. Files matching 'keemaker': $list"
         }
 
         $res = Invoke-SSHCommand -SSHSession $Session -TimeOut 30 `
@@ -1084,7 +1084,7 @@ function Install-KeyMikrotik {
                 $nl = [Environment]::NewLine + '    '
                 $msg += ($nl + 'RouterOS could not read this key. Its type is usually the reason: RSA works everywhere, Ed25519 needs RouterOS 7.12 or newer,' +
                          $nl + 'ECDSA and security keys are not supported. Generate an RSA key and deploy that one:' +
-                         $nl + '.\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik')
+                         $nl + '.\Keemaker.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik')
             }
             throw $msg
         }
@@ -1133,12 +1133,12 @@ function Get-StaleHostKeyFix {
 
 function Invoke-KeyProbe {
     param([string]$Ssh, [string]$Priv, [string]$Server, [int]$Port, [string]$Username, [string]$Target, [string[]]$ExtraArgs = @())
-    $probe = if ($Target -eq 'mikrotik') { ':put KPT_OK' } else { 'echo KPT_OK' }
+    $probe = if ($Target -eq 'mikrotik') { ':put KMKR_OK' } else { 'echo KMKR_OK' }
     $sshArgs = @('-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'IdentitiesOnly=yes',
                  '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10') + $ExtraArgs +
                @('-p', "$Port", '-i', $Priv, "$Username@$Server", $probe)
     $t = Invoke-Native -File $Ssh -Arguments $sshArgs
-    return [pscustomobject]@{ Ok = ($t.ExitCode -eq 0 -and $t.StdOut -match 'KPT_OK'); StdErr = $t.StdErr; ExitCode = $t.ExitCode }
+    return [pscustomobject]@{ Ok = ($t.ExitCode -eq 0 -and $t.StdOut -match 'KMKR_OK'); StdErr = $t.StdErr; ExitCode = $t.ExitCode }
 }
 
 # returns 'ok' | 'legacy' (works only with legacy algorithms) | 'failed' | 'skipped'
@@ -1214,7 +1214,7 @@ function Disable-PasswordAuth {
     $remote = @'
 MAIN=/etc/ssh/sshd_config
 DROP=/etc/ssh/sshd_config.d
-CONF=$DROP/00-sshkeykit.conf
+CONF=$DROP/00-keemaker.conf
 SSHD=$(command -v sshd || echo /usr/sbin/sshd)
 if "$SSHD" -T 2>/dev/null | grep -qi "^kbdinteractiveauthentication"; then KBD=KbdInteractiveAuthentication; else KBD=ChallengeResponseAuthentication; fi
 if [ -d "$DROP" ] && grep -qiE "^[[:space:]]*Include[[:space:]].*sshd_config\.d" "$MAIN"; then
@@ -1222,16 +1222,16 @@ if [ -d "$DROP" ] && grep -qiE "^[[:space:]]*Include[[:space:]].*sshd_config\.d"
   printf "PasswordAuthentication no\n%s no\n" "$KBD" > "$CONF"
 else
   MODE=main
-  cp -p "$MAIN" "$MAIN.kpt.bak"
+  cp -p "$MAIN" "$MAIN.keemaker.bak"
   sed -i -E "s/^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)[[:space:]].*/#&/" "$MAIN"
   printf "\nPasswordAuthentication no\n%s no\n" "$KBD" >> "$MAIN"
 fi
 if ! "$SSHD" -t 2>/dev/null; then
-  if [ "$MODE" = dropin ]; then rm -f "$CONF"; else cp -p "$MAIN.kpt.bak" "$MAIN"; fi
-  echo KPT_PW_FAILED_TEST; exit 1
+  if [ "$MODE" = dropin ]; then rm -f "$CONF"; else cp -p "$MAIN.keemaker.bak" "$MAIN"; fi
+  echo KMKR_PW_FAILED_TEST; exit 1
 fi
-(systemctl reload sshd || systemctl reload ssh || service sshd reload || service ssh reload) >/dev/null 2>&1 || { echo KPT_PW_RELOAD_FAILED; exit 1; }
-if "$SSHD" -T 2>/dev/null | grep -qiE "^(passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication) yes"; then echo KPT_PW_NOT_EFFECTIVE; else echo KPT_PW_DISABLED; fi
+(systemctl reload sshd || systemctl reload ssh || service sshd reload || service ssh reload) >/dev/null 2>&1 || { echo KMKR_PW_RELOAD_FAILED; exit 1; }
+if "$SSHD" -T 2>/dev/null | grep -qiE "^(passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication) yes"; then echo KMKR_PW_NOT_EFFECTIVE; else echo KMKR_PW_DISABLED; fi
 '@
     $remote = $remote -replace "`r", ''   # a CRLF checkout must never leak carriage returns into the remote shell
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remote))
@@ -1245,16 +1245,16 @@ if "$SSHD" -T 2>/dev/null | grep -qiE "^(passwordauthentication|kbdinteractiveau
         '-p', "$Port", '-i', $priv, "$Username@$Server", $cmd)
 
     switch -Regex ($r.StdOut) {
-        'KPT_PW_DISABLED' {
+        'KMKR_PW_DISABLED' {
             Write-Ok 'SSH password login is now disabled (password and keyboard-interactive).'
             $again = Invoke-KeyProbe -Ssh $ssh -Priv $priv -Server $Server -Port $Port -Username $Username -Target 'linux'
             if ($again.Ok) { Write-Ok 'Key-based login re-tested after the change: still works.' }
             else           { Write-Warn 'Key login could NOT be re-tested after the change - keep your current session open and check it.' }
             return
         }
-        'KPT_PW_NOT_EFFECTIVE' { Write-Warn 'The setting was written, but sshd still reports password login enabled (a Match block or an earlier config line wins). Check sshd -T on the server.'; return }
-        'KPT_PW_FAILED_TEST'   { Write-Warn 'sshd rejected the new configuration; it was reverted. Password login is unchanged.'; return }
-        'KPT_PW_RELOAD_FAILED' { Write-Warn 'The config was written, but sshd could not be reloaded. Reload it manually (systemctl reload sshd).'; return }
+        'KMKR_PW_NOT_EFFECTIVE' { Write-Warn 'The setting was written, but sshd still reports password login enabled (a Match block or an earlier config line wins). Check sshd -T on the server.'; return }
+        'KMKR_PW_FAILED_TEST'   { Write-Warn 'sshd rejected the new configuration; it was reverted. Password login is unchanged.'; return }
+        'KMKR_PW_RELOAD_FAILED' { Write-Warn 'The config was written, but sshd could not be reloaded. Reload it manually (systemctl reload sshd).'; return }
     }
     $why = if ($r.StdErr) { ($r.StdErr -split "\r?\n")[-1] } else { "exit code $($r.ExitCode)" }
     Write-Warn "Could not disable password login (needs root or working sudo): $why"
@@ -1622,10 +1622,10 @@ function Show-Usage {
     Write-Banner
     Write-Host ''
     Write-Host '  Usage' -ForegroundColor White
-    Write-Host '    .\SshKeyKit.ps1                                   interactive menu' -ForegroundColor Gray
-    Write-Host '    .\SshKeyKit.ps1 -Generate [options]               create a key pair' -ForegroundColor Gray
-    Write-Host '    .\SshKeyKit.ps1 -List                             list public keys' -ForegroundColor Gray
-    Write-Host '    .\SshKeyKit.ps1 -Deploy --host H --user U [...]   upload a key' -ForegroundColor Gray
+    Write-Host '    .\Keemaker.ps1                                   interactive menu' -ForegroundColor Gray
+    Write-Host '    .\Keemaker.ps1 -Generate [options]               create a key pair' -ForegroundColor Gray
+    Write-Host '    .\Keemaker.ps1 -List                             list public keys' -ForegroundColor Gray
+    Write-Host '    .\Keemaker.ps1 -Deploy --host H --user U [...]   upload a key' -ForegroundColor Gray
     Write-Host ''
     Write-Host '  Options  (-Type and --type styles are both accepted)' -ForegroundColor White
     Write-Host '    --type <ed25519|rsa|ecdsa>     default ed25519' -ForegroundColor Gray

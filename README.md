@@ -1,11 +1,11 @@
-# SSH Key-Kit
+# Keemaker 🔑
 
 Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a whole list, from an interactive menu or with scriptable command-line options.
 
 ```
   ╭────────────────────────────────────────────────╮
-  │ SSH KEY KIT                                    │
-  │ Generate · List · Deploy        v1.5.4         │
+  │ KEEMAKER                                       │
+  │ One key. Every door.        v1.6.0             │
   ╰────────────────────────────────────────────────╯
 
    [1] Generate               Create a new SSH key pair
@@ -16,7 +16,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
    [6] Exit
 ```
 
-## Features
+## Features ✨
 
 - **Generate** strong key pairs: Ed25519 by default, RSA or ECDSA on request, with an optional passphrase and a label.
 - **List** the public keys in your `.ssh` folder with type, length, fingerprint, label and whether the private key is present.
@@ -29,7 +29,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 - Interactive menu **and** inline options (`-Generate --type ed25519 --bits 4096`) that work in scripts; exit code `0` on success, `1` on any error.
 - Colour-coded output (green success, yellow warning, red error) with an ASCII fallback for legacy consoles.
 
-## Requirements
+## Requirements 📋
 
 | Requirement | Notes |
 |---|---|
@@ -39,23 +39,28 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 
 ## Quick start
 
-1. Copy `SshKeyKit.ps1` somewhere (or clone this repository).
+### Option A: run it directly, nothing saved to disk
+
+```powershell
+irm https://git.example.local/you/keemaker/raw/branch/main/Keemaker.ps1 | iex
+```
+
+> Piping a remote script straight into `iex` means it runs without you ever seeing it. That's fine once you trust the source, but it's good practice to open the link and read the script at least once before you do - for this one or anyone else's.
+
+### Option B: keep a local copy 💾
+
+1. Copy `Keemaker.ps1` somewhere (or clone this repository).
 2. Open PowerShell (Windows Terminal gives the best look) and run:
 
 ```powershell
-.\SshKeyKit.ps1
+powershell -ExecutionPolicy Bypass -File .\Keemaker.ps1
 ```
 
-If Windows blocks the script ("running scripts is disabled"):
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # this window only
-Unblock-File .\SshKeyKit.ps1                                 # if the file was downloaded
-```
+This bypasses the execution policy for this one run only - nothing changes permanently.
 
 Keys are read from and written to `%USERPROFILE%\.ssh`.
 
-## Interactive mode
+## Interactive mode 🖥️
 
 Run the script without arguments.
 
@@ -67,30 +72,30 @@ Run the script without arguments.
 | **Batch deploy** | Same as Deploy, but for a host-list file (see [Host-list file format](#host-list-file-format)). The password is asked once. |
 | **Deploy to known_hosts** | Lists every server found in `~\.ssh\known_hosts`, then asks which ones to deploy to (see [Deploying from known_hosts](#deploying-from-known_hosts)). |
 
-## Command-line mode
+## Command-line mode ⌨️
 
 Passing an action switch skips the menu. Options can be written PowerShell-style (`-Type rsa`) or GNU-style (`--type rsa` or `--type=rsa`).
 
 ```powershell
 # Generate
-.\SshKeyKit.ps1 -Generate                                    # ed25519, id_ed25519, label user@computer
-.\SshKeyKit.ps1 -Generate --type ed25519 --byte 2048         # length is ignored for ed25519 (fixed)
-.\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_prod --label "sina@work"
+.\Keemaker.ps1 -Generate                                    # ed25519, id_ed25519, label user@computer
+.\Keemaker.ps1 -Generate --type ed25519 --byte 2048         # length is ignored for ed25519 (fixed)
+.\Keemaker.ps1 -Generate --type rsa --bits 4096 --name id_prod --label "sina@work"
 
 # List
-.\SshKeyKit.ps1 -List
+.\Keemaker.ps1 -List
 
 # Deploy to one server (the password is prompted, hidden, if -Password is omitted)
-.\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user admin --key id_ed25519
+.\Keemaker.ps1 -Deploy --host 10.0.0.5 --user admin --key id_ed25519
 
 # Generate a key and deploy it in one go
-.\SshKeyKit.ps1 -Generate -Deploy --host srv01 --user admin
+.\Keemaker.ps1 -Generate -Deploy --host srv01 --user admin
 
 # Deploy to many servers
-.\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin
+.\Keemaker.ps1 -Deploy --host-list .\servers.txt --user admin
 
 # Deploy to servers already in known_hosts (always shows the picker, even here)
-.\SshKeyKit.ps1 -Deploy -FromKnownHosts --key id_ed25519 --user admin
+.\Keemaker.ps1 -Deploy -FromKnownHosts --key id_ed25519 --user admin
 ```
 
 ### Options
@@ -125,21 +130,21 @@ Passing an action switch skips the menu. Options can be written PowerShell-style
 ```powershell
 # type it once, reuse it for several runs
 $pw = Read-Host -AsSecureString "Router password"
-.\SshKeyKit.ps1 -Deploy --host-list .\servers.txt --user admin -Password $pw
+.\Keemaker.ps1 -Deploy --host-list .\servers.txt --user admin -Password $pw
 
 # from a credential object
 $cred = Get-Credential admin
-.\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user $cred.UserName -Password $cred.Password
+.\Keemaker.ps1 -Deploy --host 10.0.0.5 --user $cred.UserName -Password $cred.Password
 
 # from a secret store (e.g. Microsoft.PowerShell.SecretManagement), if the secret is stored as a SecureString
-.\SshKeyKit.ps1 -Deploy --host 10.0.0.5 --user admin -Password (Get-Secret -Name RouterAdmin)
+.\Keemaker.ps1 -Deploy --host 10.0.0.5 --user admin -Password (Get-Secret -Name RouterAdmin)
 ```
 
 If you omit them, the tool prompts with hidden input.
 
 Exit codes: `0` success, `1` error or, in batch mode, at least one failed host.
 
-## Deploying keys
+## Deploying keys 📡
 
 ### Targets and OS detection
 
@@ -162,7 +167,7 @@ With `--target auto` (the default) the tool logs in, asks the server what it is,
 ESXi's SSH server is FIPS-restricted and does not support Ed25519 on any version ([Broadcom KB 394011](https://knowledge.broadcom.com/external/article/394011/not-possible-to-implement-sshed25519-key.html)); it accepts ECDSA (`nistp256/384/521`) and RSA (`rsa-sha2-256/512`). Because Ed25519 is this tool's default, keys for ESXi need to be generated explicitly:
 
 ```powershell
-.\SshKeyKit.ps1 -Generate --type ecdsa --name id_esxi        # or: --type rsa --bits 4096
+.\Keemaker.ps1 -Generate --type ecdsa --name id_esxi        # or: --type rsa --bits 4096
 ```
 
 An incompatible key is refused **before anything is uploaded**: immediately when you pass `--target esxi`, or right after detection when the target is `auto`. In a batch, only the affected hosts fail. To reach a mixed estate with a single key, use RSA or ECDSA for the ESXi hosts, or split them into a separate list with their own key.
@@ -172,8 +177,8 @@ An incompatible key is refused **before anything is uploaded**: immediately when
 - **Use RSA unless you know the router is recent.** RouterOS rejects keys it cannot read with `unable to load key file (wrong format or bad passphrase)!`, both from the command line and in WinBox. That message almost always means an unsupported key type, not a damaged file: Ed25519 user keys are only accepted by newer 7.x releases (7.12 or newer is reported, sources differ), and ECDSA and security keys never are. The tool reads the RouterOS version before uploading: it refuses Ed25519 on RouterOS 6.x, warns on 7.0-7.11, and reports RouterOS's own answer instead of claiming success. If the version cannot be read it says so once (run with `-Verbose` to see the router's answer) and carries on.
 
   ```powershell
-  .\SshKeyKit.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik
-  .\SshKeyKit.ps1 -Deploy --key id_mikrotik --host 192.168.88.1 --user admin
+  .\Keemaker.ps1 -Generate --type rsa --bits 4096 --name id_mikrotik
+  .\Keemaker.ps1 -Deploy --key id_mikrotik --host 192.168.88.1 --user admin
   ```
 
 - **The import is verified, not assumed.** The tool waits until the uploaded file is complete on the router, imports it, and checks that the user's key count went up. If RouterOS answers with an error, the error is shown. If RouterOS answers with nothing but no new key appears, the tool says so (*did not report a new key*) instead of claiming success, and a failing key login then marks the host as failed. Run with `-Verbose` to see every command and answer. Observed on real routers: RouterOS 7.8 rejects Ed25519 user keys, 7.24.2 accepts them.
@@ -292,13 +297,13 @@ Keep a console session open while you do this, because old SSH clients may stop 
 
 - It only runs **after key-based login was verified in the same run**. If the login test fails or is skipped, nothing is changed.
 - It disables both `PasswordAuthentication` and keyboard-interactive authentication (otherwise PAM can still accept passwords).
-- If `sshd_config` includes `sshd_config.d/*.conf`, a drop-in `00-sshkeykit.conf` is written; otherwise `sshd_config` is edited after making a `.kpt.bak` backup.
+- If `sshd_config` includes `sshd_config.d/*.conf`, a drop-in `00-keemaker.conf` is written; otherwise `sshd_config` is edited after making a `.keemaker.bak` backup.
 - The result is validated with `sshd -t` and reverted on error; sshd is reloaded and the effective settings are checked with `sshd -T`. Key login is re-tested afterwards.
 - It runs as root, or through `sudo` using the login password (sent on stdin, never on a command line).
 
 Keep your current session open until you have confirmed you can still log in. A `Match` block or an earlier config line can override the setting; the tool tells you when `sshd -T` still reports password login as enabled.
 
-## Security notes
+## Security notes 🔒
 
 - Passwords and passphrases are never accepted as plain text on the command line: `-Password` / `-Passphrase` take a `SecureString`, and `--password=...` is rejected, so secrets stay out of shell history and process lists. See [Passing passwords and passphrases](#passing-passwords-and-passphrases).
 - The passphrase is handed to `ssh-keygen` as a command-line argument, so it is briefly visible to other processes on the same machine. Acceptable on a single-user admin workstation; loading the key into ssh-agent means you type it once.
@@ -318,7 +323,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Key exchange failed ... host key was not trusted* | You answered *N* at the fingerprint prompt. Re-run and answer *Y*, or use `-AcceptHostKey`. |
 | *Key-based login failed* | On the server check `PubkeyAuthentication`, the permissions of the home directory and `~/.ssh`, and SELinux contexts. |
 | *Could not read the RouterOS version* | Harmless: the deployment continues. v1.3.5 and older could not read the version on real routers (a bare `get` prints nothing over SSH); fixed in 1.3.6. If it still appears, run with `-Verbose` and look at the answer for `:put [/system resource get version]`. |
-| MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\SshKeyKit.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
+| MikroTik: key uploaded but *not installed* / *did not report a new key* | Run `.\Keemaker.ps1 -Deploy ... -Verbose` and check on the router: `/file print`, `/user ssh-keys print`. Use an RSA key unless the router runs RouterOS 7.12 or newer (see [MikroTik notes](#mikrotik-notes)). |
 | *The term 'New-SSHSession' is not recognized* (v1.3.4 and older) / *Could not install Posh-SSH* | The Posh-SSH module is missing. v1.3.5 offers to install it; if that fails (no access to the PowerShell Gallery, old PowerShellGet), install it yourself with `Install-Module -Name Posh-SSH -Scope CurrentUser -Force`. On an offline machine copy the `Posh-SSH` folder from the [Posh-SSH repository](https://github.com/darkoperator/Posh-SSH) into `$HOME\Documents\WindowsPowerShell\Modules\` (Windows PowerShell) or `$HOME\Documents\PowerShell\Modules\` (PowerShell 7). |
 | *Errors occurred while loading the format data file... cannot be loaded because running scripts is disabled on this system* | Posh-SSH's own display-format files were blocked by your execution policy (v1.5.3 and later: harmless, the deploy still runs - see below; v1.5.2 and older: this stopped the deploy). |
 | *Unable to negotiate ... no matching MAC (or cipher, key exchange method, host key type) found* | The device only offers legacy SSH algorithms. See [Older devices](#older-devices-that-only-offer-legacy-algorithms). |
@@ -329,7 +334,7 @@ Keep your current session open until you have confirmed you can still log in. A 
 | *Could not identify the remote OS* | The device is not one of the supported types, or `uname` is unavailable. Pass `--target` explicitly if it is supported. |
 | Odd symbols in the banner | The tool falls back to ASCII automatically outside Windows Terminal or VS Code. Windows Terminal is recommended. |
 
-## Status and limitations
+## Status and limitations 📊
 
 | Area | Status |
 |---|---|
@@ -341,17 +346,18 @@ Keep your current session open until you have confirmed you can still log in. A 
 
 Other limits: the key folder is always `%USERPROFILE%\.ssh`; list files do not support IPv6 addresses.
 
-## Contributing
+## Contributing 🤝
 
 - Keep line endings consistent. The repository includes a `.gitattributes` that stores `*.ps1` with LF (`* text=auto`, `*.ps1 text eol=lf`). Scripts embedded in the file and sent to servers are stripped of carriage returns, so a CRLF checkout on Windows works too.
 - Static analysis: the password-related PSScriptAnalyzer rules are satisfied (secrets are `SecureString` only, and nothing uses `ConvertTo-SecureString -AsPlainText`). The coloured UI deliberately uses `Write-Host`, so expect `PSAvoidUsingWriteHost` notes.
 - Keep the file pure ASCII (glyphs are built from character codes) so Windows PowerShell 5.1 never misreads its encoding.
 - Please test changes against a real SSH server; the Linux paths were verified against OpenSSH with password auth, sudo, root and bulk lists.
 
-## Changelog
+## Changelog 📜
 
 | Version | Changes |
 |---|---|
+| **1.6.0** | Renamed from SshKeyKit to **Keemaker**, a nod to *the Keymaker* from The Matrix. `SshKeyKit.ps1` is now `Keemaker.ps1`; the sshd drop-in file is `00-keemaker.conf`; the Linux config backup suffix is `.keemaker.bak`. No functional changes. |
 | **1.5.4** | Sets the PowerShell execution policy to `Bypass` for its own process before deploying (undone when the window closes), fixing the common case where execution policy was never configured on the machine at all. Unblocks every installed version of Posh-SSH, not just one. |
 | **1.5.3** | Fix: a blocked or execution-policy-restricted Posh-SSH format file (`Errors occurred while loading the format data file...`) stopped every deploy, even though the module's actual commands still worked. The module folder is now unblocked automatically, and only a genuine command failure is treated as an error - with guidance that distinguishes a Group-Policy lock from one you can fix yourself. |
 | **1.5.2** | If only one key exists, it is used automatically (no picker) for Deploy, Batch deploy and Deploy to known_hosts; the picker still appears whenever there is more than one. |
