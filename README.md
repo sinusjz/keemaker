@@ -42,7 +42,7 @@ Generate, inspect and deploy SSH key pairs from PowerShell: to one server or a w
 ### Option A: run it directly, nothing saved to disk
 
 ```powershell
-irm https://git.example.local/you/keemaker/raw/branch/main/Keemaker.ps1 | iex
+irm https://raw.githubusercontent.com/sinusjz/keemaker/main/Keemaker.ps1 | iex
 ```
 
 > Piping a remote script straight into `iex` means it runs without you ever seeing it. That's fine once you trust the source, but it's good practice to open the link and read the script at least once before you do - for this one or anyone else's.
